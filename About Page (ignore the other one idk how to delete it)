@@ -1,0 +1,74 @@
+import SwiftUI
+
+struct ContentView: View {
+    var body: some View {
+        
+        VStack(alignment:.center){
+            Text("Location #1")
+                .font(.largeTitle)
+                .fontWeight(.bold)
+            Spacer()
+        }
+        VStack{
+            Image("Bridgeport")
+                .resizable()
+                .scaledToFit()
+                .ignoresSafeArea()
+                .frame(height: 400)
+                .position(x:201,y:80)
+        }
+            HStack{
+                Button("About                       ") {
+                    /*@START_MENU_TOKEN@*//*@PLACEHOLDER=Action@*/ /*@END_MENU_TOKEN@*/
+                }
+                .position(x:70, y:110)
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.roundedRectangle)
+                .controlSize(.extraLarge)
+                Button("Reviews                       "){
+                    
+                }
+                .position(x:65, y:110)
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.roundedRectangle)
+                .controlSize(.extraLarge)
+                Button("Improve                              "){
+                    
+                }
+                .buttonStyle(.bordered)
+                .position(x:58, y:110)
+                .buttonBorderShape(.roundedRectangle)
+                .controlSize(.extraLarge)
+        }
+        VStack{
+            Text("Hours:")
+                .position(x:31, y:45)
+                .font(.system(size:20))
+            Text("Mon: 11:00a-7:00p")
+                .position(x:74, y:44)
+            Text("Tues: 11:00a-7:00p")
+                .position(x:74, y:44)
+            Text("Wed: 11:00a-7:00p")
+                .position(x:74, y:44)
+            Text("Thurs: 11:00a-7:00p")
+                .position(x:79, y:44)
+            Text("Fri: 11:00a-7:00p")
+                .position(x:68, y:44)
+            Text("Sat: 11:00a-8:00p")
+                .position(x:70, y:44)
+            Text("Sun: 11:00a-8:00p")
+                .position(x:72, y:44)
+        }
+    
+        
+        VStack{
+            Text("Contact:")
+                .position(x:38, y:85)
+                .font(.system(size: 20))
+            Text("555-01-01")
+                .position(x:48, y:59)
+                .font(.system(size:20))
+                
+            Text("location#1.com")
+                .position(x:60, y:32)
+                .foregroundColor(.blue)
