@@ -1,0 +1,292 @@
+import SwiftUI
+import PhotosUI
+
+func fixedDate(year: Int, month: Int, day: Int, hour: Int = 12, minute: Int = 0) -> Date {
+    var components = DateComponents()
+    components.year = year
+    components.month = month
+    components.day = day
+    components.hour = hour
+    components.minute = minute
+    components.calendar = Calendar(identifier: .gregorian)
+    return components.date ?? Date(timeIntervalSince1970: 0)
+}
+
+// Simple models to keep this demo self-contained
+struct Location: Identifiable, Hashable {
+    let id = UUID()
+    var name: String
+    var address: String
+    var reviews: [Review]
+}
+
+struct Review: Identifiable, Hashable {
+    let id = UUID()
+    var author: String
+    var rating: Int // 1...5
+    var text: String
+    var images: [Image] = [] // Optional photos
+    var isReport: Bool = false
+    var datePosted: Date = Date()
+
+    static func == (lhs: Review, rhs: Review) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+}
+
+struct ContentView: View {
+    // Notification permission state (mocked for demo)
+    @State private var showNotificationBanner: Bool = true
+    @State private var notificationsAllowed: Bool? = nil // nil = not decided, true/false decided
+
+    // Saved locations sample data
+    @State private var locations: [Location] = [
+        Location(name: "Richard J. Daley Branch Library", address: "3400 S Halsted St., Chicago, IL 60608", reviews: [
+            Review(author: "Mauryce", rating: 5, text: "Great wheelchair access and clear signage.", images: [], datePosted: fixedDate(year: 2024, month: 5, day: 20, hour: 11, minute: 45)), // fixed date
+            Review(author: "Michelle", rating: 5, text: "Accessible entrance.", images: [], datePosted: fixedDate(year: 2024, month: 5, day: 21, hour: 14, minute: 30)) // fixed date
+        ]),
+        Location(name: "McGuane Park Fieldhouse", address: "2901 S Poplar Ave., Chicago, IL 60608", reviews: [
+            Review(author: "Angela", rating: 5, text: "The ramp to the fieldhouse makes it easy to enter the building", images: [], datePosted: fixedDate(year: 2024, month: 5, day: 22, hour: 9, minute: 5)) // fixed date
+        ]),
+        Location(name: "Cermak Fresh Market", address: "3033 S Halsted St, Chicago, IL 60608", reviews: []),
+        
+        Location(name: "Mariano's", address: "3145 S Ashland Ave., Chicago, IL 60608", reviews: [
+            Review(author: "Michelle", rating: 3, text: "There is only one entrance which works well, but it can get crowded.", images: [], datePosted: fixedDate(year: 2024, month: 5, day: 22, hour: 18, minute: 0)), // fixed date
+            Review(author: "Angela", rating: 5, text: "Automatic door works very well. I had no trouble getting through the door", images: [], datePosted: fixedDate(year: 2024, month: 5, day: 23, hour: 10, minute: 10)) // fixed date
+            
+        ]),
+    ]
+
+    // Selection / presentation
+    @State private var selectedLocation: Location? = nil
+    
+    // Added state for delete confirmation
+    @State private var pendingDeleteOffsets: IndexSet? = nil
+    @State private var showDeleteAlert: Bool = false
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                if showNotificationBanner && notificationsAllowed == nil {
+                    NotificationPermissionBanner(
+                        allowAction: {
+                            notificationsAllowed = true
+                            withAnimation { showNotificationBanner = false }
+                            // In a real app, trigger UNUserNotificationCenter authorization here
+                        },
+                        denyAction: {
+                            notificationsAllowed = false
+                            withAnimation { showNotificationBanner = false }
+                        }
+                    )
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+
+                List {
+                    Section(header: Text("Saved Locations")) {
+                        ForEach(locations) { location in
+                            Button {
+                                selectedLocation = location
+                            } label: {
+                                HStack(alignment: .top, spacing: 12) {
+                                    Image(systemName: "mappin.circle.fill")
+                                        .font(.system(size: 28))
+                                        .foregroundStyle(.tint)
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(location.name)
+                                            .font(.headline)
+                                        Text(location.address)
+                                            .font(.subheadline)
+                                            .foregroundStyle(.secondary)
+                                        if !location.reviews.isEmpty {
+                                            HStack(spacing: 6) {
+                                                Image(systemName: "star.fill").font(.caption2)
+                                                Text(averageRatingText(for: location))
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        } else {
+                                            Text("No reviews yet")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .font(.footnote)
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                        }
+                        .onDelete { offsets in
+                            pendingDeleteOffsets = offsets
+                            showDeleteAlert = true
+                        }
+                    }
+                }
+                .listStyle(.insetGrouped)
+            }
+            .navigationTitle("Saved Locations")
+            .sheet(item: $selectedLocation) { location in
+                let binding = Binding(
+                    get: { locations.first(where: { $0.id == location.id }) ?? location },
+                    set: { updated in
+                        if let idx = locations.firstIndex(where: { $0.id == location.id }) {
+                            locations[idx] = updated
+                        }
+                    }
+                )
+                ReviewsSheet(
+                    location: binding,
+                    onDismiss: { selectedLocation = nil }
+                )
+                .presentationDetents([.medium, .large])
+            }
+            .alert("Delete this location?", isPresented: $showDeleteAlert) {
+                Button("Delete", role: .destructive) {
+                    if let offsets = pendingDeleteOffsets {
+                        locations.remove(atOffsets: offsets)
+                        pendingDeleteOffsets = nil
+                    }
+                }
+                Button("Cancel", role: .cancel) {
+                    pendingDeleteOffsets = nil
+                }
+            } message: {
+                Text("This will delete the selected location and you will not be notified anymore.")
+            }
+        }
+    }
+
+    private func averageRatingText(for location: Location) -> String {
+        let ratings = location.reviews.map { Double($0.rating) }
+        guard !ratings.isEmpty else { return "No reviews yet" }
+        let avg = ratings.reduce(0, +) / Double(ratings.count)
+        return String(format: "%.1f avg (%d)", avg, ratings.count)
+    }
+}
+
+// MARK: - Notification Permission Banner
+struct NotificationPermissionBanner: View {
+    var allowAction: () -> Void
+    var denyAction: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: "bell.badge.fill")
+                    .imageScale(.large)
+                    .foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Get notified of new reviews")
+                        .font(.headline)
+                    Text("Allow notifications to be alerted when someone posts a new accessibility review for your saved locations.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            HStack {
+                Button("Don't Allow") { denyAction() }
+                    .buttonStyle(.bordered)
+                Button("Allow") { allowAction() }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding()
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .padding([.horizontal, .top])
+    }
+}
+
+// MARK: - Reviews Sheet
+struct ReviewsSheet: View {
+    @Binding var location: Location
+    var onDismiss: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                if location.reviews.isEmpty {
+                    ContentUnavailableView(
+                        "No Reviews Yet",
+                        systemImage: "text.bubble",
+                        description: Text("Be the first to share accessibility details for this location.")
+                    )
+                    .frame(maxHeight: .infinity)
+                } else {
+                    List {
+                        Section(header: Text("Reviews")) {
+                            ForEach(location.reviews) { review in
+                                ReviewRow(review: review)
+                            }
+                            .onDelete { offsets in
+                                location.reviews.remove(atOffsets: offsets)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle(location.name)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { onDismiss() }
+                }
+            }
+        }
+    }
+}
+
+struct ReviewRow: View {
+    var review: Review
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top) {
+                Image(systemName: review.isReport ? "exclamationmark.bubble.fill" : "person.circle.fill")
+                    .foregroundStyle(review.isReport ? .orange : .secondary)
+                VStack(alignment: .leading, spacing: 2){
+                    Text(review.author)
+                        .font(.subheadline)
+                    Text(review.datePosted.formatted(
+                        date: .abbreviated,
+                        time: .shortened
+                    ))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                }
+                
+                Spacer()
+                
+                Text(String(repeating: "★", count: max(0, review.rating)))
+                    .font(.caption)
+                    .foregroundStyle(.yellow)
+            }
+            if !review.images.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(review.images.indices, id: \.self) { i in
+                            review.images[i]
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: 200, height: 140)
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                        }
+                    }
+                }
+            }
+            Text(review.text)
+        }
+        .padding(.vertical, 6)
+    }
+}
+
+#Preview {
+    ContentView()
+}
