@@ -1,0 +1,48 @@
+import SwiftUI
+import Combine
+
+final class AppData: ObservableObject {
+    @Published var reviews: [Review] = []
+    @Published var improvements: [Improvement] = []
+    
+    func add(review: Review) {
+        reviews.insert(review, at: 0)
+        saveReviews()
+    }
+    
+    func deleteReviews(at offsets: IndexSet) {
+        reviews.remove(atOffsets: offsets)
+        saveReviews()
+    }
+    
+    func add(improvement: Improvement) {
+        improvements.insert(improvement, at: 0)
+    }
+    
+    func deleteImprovements(at offsets: IndexSet) {
+        improvements.remove(atOffsets: offsets)
+    }
+    private let reviewKey = "SavedReviews"
+    private func saveReviews(){
+        if let encoded = try? JSONEncoder().encode(reviews){
+            UserDefaults.standard.set(encoded, forKey: reviewKey)
+        }
+    }
+    private func loadReviews(){
+        guard
+            let data = UserDefaults.standard.data(forKey: reviewKey),
+            let decoded = try? JSONDecoder().decode([Review].self, from: data)
+        else { return }
+        reviews = decoded
+    }
+    init(){
+        loadReviews()
+    }
+    func likeReview(review: Review) {
+        if let index = reviews.firstIndex(where: { $0.id == review.id}){
+            reviews[index].likes += 1
+            saveReviews()
+        }
+    }
+    
+}
