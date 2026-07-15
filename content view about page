@@ -1,0 +1,102 @@
+//
+//  ContentView.swift
+//  about page
+//
+//  Created by sermacbook_09 on 7/14/26.
+//
+
+import SwiftUI
+
+
+enum Route: Hashable {
+    case reviews
+    case improve
+}
+
+struct ContentView: View {
+    @StateObject private var appData = AppData()
+    @State private var path: [Route] = []
+
+    var body: some View {
+        NavigationStack(path: $path) {
+            ScrollView {
+                VStack(alignment: .center, spacing: 16) {
+                    // Title
+                    Text("Location #1")
+                        .font(.largeTitle)
+                        .fontWeight(.bold)
+
+                    // Image
+                    Image("Bridgeport")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(height: 400)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                    // Buttons row
+                    HStack(spacing: 12) {
+                        Button("About") { }
+                            .buttonStyle(.borderedProminent)
+                            .buttonBorderShape(.roundedRectangle)
+                            .controlSize(.large)
+
+                        Button("Reviews") {
+                            path.append(.reviews)
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.roundedRectangle)
+                        .controlSize(.large)
+
+                        Button("Improve") {
+                            path.append(.improve)
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.roundedRectangle)
+                        .controlSize(.large)
+                    }
+
+                    // Hours
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Hours:")
+                            .font(.system(size: 20, weight: .semibold))
+                        Text("Mon: 11:00a-7:00p")
+                        Text("Tues: 11:00a-7:00p")
+                        Text("Wed: 11:00a-7:00p")
+                        Text("Thurs: 11:00a-7:00p")
+                        Text("Fri: 11:00a-7:00p")
+                        Text("Sat: 11:00a-8:00p")
+                        Text("Sun: 11:00a-8:00p")
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    // Contact
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Contact:")
+                            .font(.system(size: 20, weight: .semibold))
+                        Text("555-01-01")
+                            .font(.system(size: 20))
+                        Text("location#1.com")
+                            .foregroundColor(.blue)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding()
+            }
+            .navigationDestination(for: Route.self) { route in
+                switch route {
+                    
+                case .reviews:
+                    ReviewsView()
+                        .environmentObject(appData)
+                case .improve:
+                    ImproveView()
+                        .environmentObject(appData)
+                }
+            }
+        }
+    }
+}
+
+#Preview {
+    ContentView()
+}
