@@ -1,0 +1,152 @@
+import SwiftUI
+import PhotosUI
+import Combine
+
+struct Improvement: Identifiable {
+    let id = UUID()
+    var text: String
+    var date: Date
+    var images: [UIImage]
+}
+
+
+
+struct ImproveView: View {
+    @EnvironmentObject var appData: AppData
+    @State private var suggestionText: String = ""
+    @State private var photoItems: [PhotosPickerItem] = []
+    @State private var selectedImages: [UIImage] = []
+    @State private var alertMessage: String?
+
+    var body: some View {
+        VStack {
+            Form {
+                Section("Suggest an Improvement") {
+                    TextEditor(text: $suggestionText)
+                        .frame(minHeight: 120)
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.3)))
+                        .padding(.vertical, 4)
+
+                    PhotosPicker(selection: $photoItems, maxSelectionCount: 5, matching: .images) {
+                        Label("Add Photos", systemImage: "photo.on.rectangle")
+                    }
+                    .onChange(of: photoItems) { _, newItems in
+                        Task {
+                            var images: [UIImage] = []
+                            for item in newItems {
+                                if let data = try? await item.loadTransferable(type: Data.self),
+                                   let image = UIImage(data: data) {
+                                    images.append(image)
+                                }
+                            }
+                            selectedImages = images
+                        }
+                    }
+
+                    if !selectedImages.isEmpty {
+                        ScrollView(.horizontal) {
+                            HStack {
+                                ForEach(Array(selectedImages.enumerated()), id: \.offset) { _, img in
+                                    Image(uiImage: img)
+                                        .resizable()
+                                        .scaledToFill()
+                                        .frame(width: 80, height: 80)
+                                        .clipped()
+                                        .cornerRadius(8)
+                                }
+                            }
+                        }
+                    }
+
+                    Button("Submit") {
+                        submit()
+                    }
+                    .disabled(suggestionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+
+                if !appData.improvements.isEmpty {
+                    Section("Previous Suggestions") {
+                        ForEach(appData.improvements) { item in
+                            ImprovementRow(improvement: item)
+                        }
+                        .onDelete(perform: appData.deleteImprovements)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Improve")
+        .alert("Notice", isPresented: Binding(get: { alertMessage != nil }, set: { if !$0 { alertMessage = nil } })) {
+            Button("OK", role: .cancel) { alertMessage = nil }
+        } message: {
+            Text(alertMessage ?? "")
+        }
+    }
+
+    private func submit() {
+        let trimmedText = suggestionText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty else { return }
+        let filtered = filterProfanity(in: trimmedText)
+        if filtered.wasFiltered {
+            alertMessage = "Some words were filtered."
+        }
+        let item = Improvement(text: filtered.text, date: Date(), images: selectedImages)
+        appData.add(improvement: item)
+        suggestionText = ""
+        photoItems = []
+        selectedImages = []
+    }
+}
+
+private struct ImprovementRow: View {
+    let improvement: Improvement
+    private let dateFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.dateStyle = .medium
+        df.timeStyle = .short
+        return df
+    }()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(dateFormatter.string(from: improvement.date))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+            }
+            Text(improvement.text)
+            if !improvement.images.isEmpty {
+                ScrollView(.horizontal) {
+                    HStack {
+                        ForEach(Array(improvement.images.enumerated()), id: \.offset) { _, img in
+                            Image(uiImage: img)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: 100, height: 100)
+                                .clipped()
+                                .cornerRadius(8)
+                        }
+                    }
+                }
+                .frame(height: 110)
+            }
+        }
+    }
+}
+
+// Reuse the same profanity filter from ReviewsView
+private func filterProfanity(in text: String) -> (text: String, wasFiltered: Bool) {
+    let badWords = ["badword", "darn", "heck"]
+    var output = text
+    var didFilter = false
+    for word in badWords {
+        let pattern = "\\b" + NSRegularExpression.escapedPattern(for: word) + "\\b"
+        if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
+            let matches = regex.numberOfMatches(in: output, range: NSRange(location: 0, length: (output as NSString).length))
+            if matches > 0 { didFilter = true }
+            output = regex.stringByReplacingMatches(in: output, options: [], range: NSRange(location: 0, length: (output as NSString).length), withTemplate: String(repeating: "*", count: word.count))
+        }
+    }
+    return (output, didFilter)
+}
+
