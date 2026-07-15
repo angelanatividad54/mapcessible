@@ -1,0 +1,23 @@
+import SwiftUI
+import Combine
+
+final class AppData: ObservableObject {
+    @Published var reviews: [Review] = []
+    @Published var improvements: [Improvement] = []
+
+    func add(review: Review) {
+        reviews.insert(review, at: 0)
+    }
+
+    func deleteReviews(at offsets: IndexSet) {
+        reviews.remove(atOffsets: offsets)
+    }
+
+    func add(improvement: Improvement) {
+        improvements.insert(improvement, at: 0)
+    }
+
+    func deleteImprovements(at offsets: IndexSet) {
+        improvements.remove(atOffsets: offsets)
+    }
+}
