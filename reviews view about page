@@ -1,0 +1,204 @@
+import SwiftUI
+import PhotosUI
+
+struct Review: Identifiable {
+    let id = UUID()
+    var rating: Int
+    var text: String
+    var date: Date
+    var images: [UIImage]
+}
+
+
+struct ReviewsView: View {
+    @EnvironmentObject var appData: AppData
+    @State private var reviewText: String = ""
+    @State private var rating: Int = 0
+    @State private var photoItems: [PhotosPickerItem] = []
+    @State private var selectedImages: [UIImage] = []
+    @State private var alertMessage: String?
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            VStack {
+                Form {
+                    Section("Add a Review") {
+                        StarRating(rating: $rating)
+                        TextEditor(text: $reviewText)
+                            .frame(minHeight: 100)
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.3)))
+                            .padding(.vertical, 4)
+
+                        PhotosPicker(selection: $photoItems, maxSelectionCount: 5, matching: .images) {
+                            Label("Add Photos", systemImage: "photo.on.rectangle")
+                        }
+                        .onChange(of: photoItems) { _, newItems in
+                            Task {
+                                var images: [UIImage] = []
+                                for item in newItems {
+                                    if let data = try? await item.loadTransferable(type: Data.self),
+                                       let image = UIImage(data: data) {
+                                        images.append(image)
+                                    }
+                                }
+                                selectedImages = images
+                            }
+                        }
+
+                        if !selectedImages.isEmpty {
+                            ScrollView(.horizontal) {
+                                HStack {
+                                    ForEach(Array(selectedImages.enumerated()), id: \.offset) { _, img in
+                                        Image(uiImage: img)
+                                            .resizable()
+                                            .scaledToFill()
+                                            .frame(width: 80, height: 80)
+                                            .clipped()
+                                            .cornerRadius(8)
+                                    }
+                                }
+                            }
+                        }
+
+                        Button("Post Review") {
+                            postReview()
+                        }
+                        .disabled(rating == 0 || reviewText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+
+                    if appData.reviews.isEmpty == false {
+                        Section("Reviews") {
+                            ForEach(appData.reviews) { review in
+                                ReviewRow(review: review)
+                                    .id(review.id)
+                            }
+                            .onDelete(perform: appData.deleteReviews)
+                        }
+                    }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .scrollToReview)) { output in
+                    if let id = output.object as? UUID {
+                        withAnimation { proxy.scrollTo(id, anchor: .top) }
+                    }
+                }
+            }
+        }
+        .navigationTitle("Reviews")
+        .alert("Notice", isPresented: Binding(get: { alertMessage != nil }, set: { if !$0 { alertMessage = nil } })) {
+            Button("OK", role: .cancel) { alertMessage = nil }
+        } message: {
+            Text(alertMessage ?? "")
+        }
+    }
+
+    private func postReview() {
+        let filtered = filterProfanity(in: reviewText)
+        if filtered.wasFiltered {
+            alertMessage = "Some words were filtered."
+        }
+        let new = Review(rating: rating, text: filtered.text, date: Date(), images: selectedImages)
+        appData.add(review: new)
+        // Scroll to the newly added review
+        DispatchQueue.main.async {
+            withAnimation {
+                // Use a notification to communicate with the ScrollViewReader via preference/anchor
+                NotificationCenter.default.post(name: .scrollToReview, object: new.id)
+            }
+        }
+        // reset inputs
+        reviewText = ""
+        rating = 0
+        photoItems = []
+        selectedImages = []
+    }
+}
+
+private func filterProfanity(in text: String) -> (text: String, wasFiltered: Bool) {
+    // Simple example list; expand as needed.
+    let badWords = ["badword", "darn", "heck"]
+    var output = text
+    var didFilter = false
+    for word in badWords {
+        let pattern = "\\b" + NSRegularExpression.escapedPattern(for: word) + "\\b"
+        if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
+            let matches = regex.numberOfMatches(in: output, range: NSRange(location: 0, length: (output as NSString).length))
+            if matches > 0 { didFilter = true }
+            output = regex.stringByReplacingMatches(in: output, options: [], range: NSRange(location: 0, length: (output as NSString).length), withTemplate: String(repeating: "*", count: word.count))
+        }
+    }
+    return (output, didFilter)
+}
+
+private struct ReviewRow: View {
+    let review: Review
+    private let dateFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.dateStyle = .medium
+        df.timeStyle = .short
+        return df
+    }()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                StarIcons(rating: review.rating)
+                Spacer()
+                Text(dateFormatter.string(from: review.date))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Text(review.text)
+            if !review.images.isEmpty {
+                ScrollView(.horizontal) {
+                    HStack {
+                        ForEach(Array(review.images.enumerated()), id: \.offset) { _, img in
+                            Image(uiImage: img)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: 100, height: 100)
+                                .clipped()
+                                .cornerRadius(8)
+                        }
+                    }
+                }
+                .frame(height: 110)
+            }
+        }
+    }
+}
+
+private struct StarRating: View {
+    @Binding var rating: Int
+    var max: Int = 5
+
+    var body: some View {
+        HStack {
+            ForEach(1...max, id: \.self) { index in
+                Image(systemName: index <= rating ? "star.fill" : "star")
+                    .foregroundStyle(index <= rating ? .yellow : .secondary)
+                    .onTapGesture { rating = index }
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Rating")
+        .accessibilityValue("\(rating) out of \(max)")
+    }
+}
+
+private struct StarIcons: View {
+    let rating: Int
+    var max: Int = 5
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(1...max, id: \.self) { index in
+                Image(systemName: index <= rating ? "star.fill" : "star")
+                    .foregroundStyle(index <= rating ? .yellow : .secondary)
+            }
+        }
+    }
+}
+
+private extension Notification.Name {
+    static let scrollToReview = Notification.Name("scrollToReview")
+}
