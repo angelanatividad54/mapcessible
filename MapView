@@ -1,0 +1,553 @@
+import SwiftUI
+import MapKit
+import CoreLocation
+import SwiftData
+
+struct ContentView: View {
+    @State private var position: MapCameraPosition = .userLocation(fallback: .automatic)
+    //Centering the camera on user location, where default is in the middle of bridgeport if user location cannot be determined
+    @State private var locationManager = CLLocationManager()
+    //Gives the location permission popup
+    @State private var is3D: Bool = false
+    //Var for the 3D view. The standard is 2d.
+    @State private var isShowingSettings = false
+    @State private var textSize: AppTextSize = .medium
+    //Sets defualt text size as medium
+    @State private var colorFilter: AppColorFilter = .none
+    //Sets default filter as normal.
+    
+    // Search properties
+    @State private var searchText = ""
+    @State private var searchResults: [MKMapItem] = []
+    @State private var selectedLocation: MKMapItem?
+    @State private var route: MKRoute?
+    
+    //Accessible coordinates
+    
+    let defaultCoordinate = CLLocationCoordinate2D(latitude: 41.836, longitude: -87.648)
+    
+    var body: some View {
+        NavigationStack {
+            ZStack(alignment: .top) {
+                //The Map View
+                Map(position: $position, selection: $selectedLocation) {
+                    UserAnnotation()
+                    
+                    ForEach(searchResults, id: \.self) { item in
+                        Marker(item.name ?? "Destination", coordinate: item.placemark.coordinate)
+                    }
+                    
+                    if let route {
+                        MapPolyline(route.polyline)
+                            .stroke(.blue, lineWidth: 5)
+                    }
+                    
+                    ForEach(benchLocation) { location in
+                        Annotation("Bench", coordinate: location.coordinate) {
+                            // Your custom identical icon goes here
+                            Image(systemName: "chair.fill") // SF Symbol
+                                .foregroundColor(.brown)
+                                .background(Circle().fill(.white).shadow(radius: 3))
+                                .dynamicTypeSize(textSize.dynamicTypeSize)
+                        }
+                    }
+                    ForEach(rampLocation) { location in
+                        Annotation("Ramp", coordinate: location.coordinate) {
+                            // Your custom identical icon goes here
+                            Image(systemName: "arrow.up.right.circle") // SF Symbol
+                                .foregroundColor(.white)
+                                .background(Circle().fill(.green).shadow(radius: 3))
+                                .dynamicTypeSize(textSize.dynamicTypeSize)
+                        }
+                    }
+                    
+                    ForEach(doorLocation) { location in
+                        Annotation("Automatic Door", coordinate: location.coordinate) {
+                            // Your custom identical icon goes here
+                            Image(systemName: "square.split.2x1.fill") // SF Symbol
+                                .resizable()
+                                .foregroundColor(.blue)
+                                .background(Circle().fill(.white).shadow(radius: 3))
+                                .dynamicTypeSize(textSize.dynamicTypeSize)
+                        }
+                    }
+                    
+                    ForEach(parkingLocation) { location in
+                        Annotation("Accessible Parking", coordinate: location.coordinate) {
+                            // Your custom identical icon goes here
+                            Image(systemName: "accessible") // SF Symbol
+                                .resizable()
+                                .foregroundColor(.white)
+                                .background(Circle().fill(.blue).shadow(radius: 3))
+                                .dynamicTypeSize(textSize.dynamicTypeSize)
+                        }
+                    }
+                }
+                .mapStyle(.standard(elevation: .realistic))
+                .ignoresSafeArea()
+                
+                .mapControls{
+                    MapScaleView()
+                }
+                
+                .searchable(text: $searchText, prompt: "Search for a destination...")
+                .onSubmit(of: .search) {
+                    performSearch()
+                }
+                // Trigger route calculation whenever the user selects a search result
+                .onChange(of: selectedLocation) { _, newLocation in
+                    if let newLocation {
+                        fetchDirections(to: newLocation)
+                    }
+                }
+                
+                // Control stack of settings, location, and 3d button
+                VStack(alignment: .trailing, spacing: 12) {
+                    Button {
+                        isShowingSettings = true
+                    } label: {
+                        Image(systemName: "gearshape.fill")
+                            .font(textSize.mapButtonIconFont)
+                            .frame(width: textSize.mapButtonSize, height: textSize.mapButtonSize)
+                    }
+                    .foregroundStyle(.white)
+                    .background(.purple, in: Circle())
+                    .accessibilityLabel("Settings")
+                    
+                    //Location tracker
+                    Button(action: {
+                        centerOnUser()
+                    }) {
+                        Image(systemName: "location.fill")
+                            .font(textSize.mapButtonIconFont)
+                            .frame(width: textSize.mapButtonSize, height: textSize.mapButtonSize)
+                        
+                    }
+                    .foregroundStyle(.purple)
+                    .background(.white, in: Circle())
+                    .accessibilityLabel("Your Location")
+                    
+                    //3D toggle
+                    Button(action: {
+                        toggle3D()
+                    }) {
+                        Text(is3D ? "2D" : "3D")
+                            .font(textSize.mapButtonIconFont)
+                            .frame(width: textSize.mapButtonSize, height: textSize.mapButtonSize)
+                        
+                    }
+                    .foregroundStyle(.purple)
+                    .background(.white, in: Circle())
+                    .accessibilityLabel("3D Toggle")
+                    
+                }
+                .padding(.leading, 300) // Distance from the right edge
+            }
+            .onAppear {
+                locationManager.requestWhenInUseAuthorization()
+                //pop up for the location permission
+            }
+            .sheet(isPresented: $isShowingSettings) {
+                SettingsView(textSize: $textSize, colorFilter: $colorFilter)
+                //opens up the panel for the setting page
+            }
+        }
+        .dynamicTypeSize(textSize.dynamicTypeSize)
+        .appColorFilter(colorFilter)
+        //applies the filter and text size
+    }
+    
+    // Logic to toggle between 2D and 3D camera states
+    private func toggle3D() {
+        withAnimation(.easeInOut(duration: 0.5)) {
+            is3D.toggle()
+            
+            // Get current center or fallback to default
+            let center = position.camera?.centerCoordinate ?? defaultCoordinate
+            let distance = position.camera?.distance ?? 1300
+            let targetPitch: Double = is3D ? 60 : 0
+            
+            position = .camera(
+                MapCamera(centerCoordinate: center, distance: distance, heading: 0, pitch: targetPitch)
+            )
+        }
+    }
+    
+    // Logic to center map back on user
+    private func centerOnUser() {
+        locationManager.requestWhenInUseAuthorization()
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+            position = .userLocation(fallback: .region(MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: 41.836, longitude: -87.648), span: MKCoordinateSpan(latitudeDelta: 0.02, longitudeDelta: 0.02))))
+        }
+    }
+    
+    // MARK: - 1. Search Logic
+    private func performSearch() {
+        guard !searchText.isEmpty else { return }
+        
+        let request = MKLocalSearch.Request()
+        request.naturalLanguageQuery = searchText
+        // Prioritize search results near the current visible map area
+        if let region = locationManager.location.map({ MKCoordinateRegion(center: $0.coordinate, span: MKCoordinateSpan(latitudeDelta: 0.3, longitudeDelta: 0.3)) }) {
+            request.region = region
+        }
+        
+        let search = MKLocalSearch(request: request)
+        search.start { response, error in
+            guard let response, error == nil else {
+                print("Search error: \(error?.localizedDescription ?? "Unknown error")")
+                return
+            }
+            
+            // Update results and clear old routes
+            self.searchResults = response.mapItems
+            self.route = nil
+            
+            // Center the map around the first search result
+            if let firstItem = response.mapItems.first {
+                self.position = .region(MKCoordinateRegion(
+                    center: firstItem.placemark.coordinate,
+                    span: MKCoordinateSpan(latitudeDelta: 0.035, longitudeDelta: 0.035)
+                ))
+            }
+        }
+    }
+    
+    // MARK: - 2. Directions Logic
+    private func fetchDirections(to destination: MKMapItem) {
+        let request = MKDirections.Request()
+        
+        // Define Point X (Starting position). Defaults to user location.
+        // Replace 'MKMapItem.forCurrentLocation()' with any custom MKMapItem to set a different Point X.
+        request.source = MKMapItem.forCurrentLocation()
+        request.destination = destination
+        request.transportType = .automobile
+        
+        let directions = MKDirections(request: request)
+        directions.calculate { response, error in
+            guard let response, let route = response.routes.first, error == nil else {
+                print("Directions error: \(error?.localizedDescription ?? "Unknown error")")
+                return
+            }
+            
+            // Save the calculated route to update the UI
+            self.route = route
+            
+            // Dynamic Zoom: Adjust map camera bounds to fit both start and end locations
+            let routeRect = route.polyline.boundingMapRect
+            self.position = .rect(routeRect)
+        }
+    }
+}
+
+struct SettingsView: View {
+    @Binding var textSize: AppTextSize
+    @Binding var colorFilter: AppColorFilter
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 20) {
+                SettingsTab(title: "Text Size", systemImage: "textformat.size") {
+                    TextSizeScale(textSize: $textSize)
+                }
+
+                SettingsTab(title: "Color Filter", systemImage: "camera.filters") {
+                    Picker("Color Filter", selection: $colorFilter) {
+                        ForEach(AppColorFilter.allCases) { filter in
+                            Text(filter.title).tag(filter)
+                        }
+                    }
+                    .pickerStyle(.wheel)
+                }
+
+                Spacer()
+            }
+            .padding()
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+}
+
+struct TextSizeScale: View {
+    @Binding var textSize: AppTextSize
+
+    private var sliderValue: Binding<Double> {
+        Binding(
+            get: { Double(textSize.scaleIndex) },
+            set: { newValue in
+                textSize = AppTextSize(scaleIndex: Int(newValue.rounded()))
+            }
+        )
+    }
+    
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 14) {
+                Text("A")
+                    .font(.caption)
+
+                Slider(
+                    value: sliderValue,
+                    in: 0...Double(AppTextSize.allCases.count - 1),
+                    step: 1
+                )
+                .accessibilityLabel("Text Size")
+                .accessibilityValue(textSize.title)
+
+                Text("A")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+            }
+
+            Text(textSize.title)
+                .font(.body)
+                .foregroundStyle(.secondary)
+
+            Text("Sample Text")
+                .font(.body)
+                .dynamicTypeSize(textSize.sampleTextSize)
+        }
+    }
+}
+
+struct SettingsTab<Content: View>: View {
+    let title: String
+    let systemImage: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: systemImage)
+                .font(.headline)
+
+            content
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+enum AppTextSize: String, CaseIterable, Identifiable {
+    case small
+    case medium
+    case large
+    case extraLarge
+    case extraExtraLarge
+    case extraExtraExtraLarge
+    case accessibilityLarge
+    
+    //creates the text size cases
+
+    var id: Self { self }
+
+    var scaleIndex: Int {
+        switch self {
+        case .small:
+            0
+        case .medium:
+            1
+        case .large:
+            2
+        case .extraLarge:
+            3
+        case .extraExtraLarge:
+            4
+        case .extraExtraExtraLarge:
+            5
+        case .accessibilityLarge:
+            6
+        }
+    }
+    // sets the panel to be a scale
+
+    init(scaleIndex: Int) {
+        let sizes = Self.allCases
+        let clampedIndex = min(max(scaleIndex, 0), sizes.count - 1)
+        self = sizes[clampedIndex]
+    }
+
+    var title: String {
+        switch self {
+        case .small:
+            "Small"
+        case .medium:
+            "Medium"
+        case .large:
+            "Large"
+        case .extraLarge:
+            "Extra Large"
+        case .extraExtraLarge:
+            "Extra Extra Large"
+        case .extraExtraExtraLarge:
+            "Extra Extra Extra Large"
+        case .accessibilityLarge:
+            "Accessibility Large"
+        }
+    }
+
+    var dynamicTypeSize: DynamicTypeSize {
+        switch self {
+        case .small:
+            .small
+        case .medium:
+            .medium
+        case .large:
+            .large
+        case .extraLarge:
+            .xLarge
+        case .extraExtraLarge:
+            .xxLarge
+        case .extraExtraExtraLarge:
+            .xxxLarge
+        case .accessibilityLarge:
+            .accessibility1
+        }
+    }
+    //sets the actual font size to the cases
+    
+    var mapButtonSize: CGFloat {
+        switch self {
+        case .small:
+            40
+        case .medium:
+            44
+        case .large:
+            52
+        case .extraLarge:
+            60
+        case .extraExtraLarge:
+            68
+        case .extraExtraExtraLarge:
+            76
+        case .accessibilityLarge:
+            84
+        }
+    }
+    //sets the size of the buttons to coordinate with the text size scale
+    
+    var mapButtonIconFont: Font {
+        switch self {
+        case .small:
+            .body
+        case .medium:
+            .title3
+        case .large:
+            .title2
+        case .extraLarge:
+            .title
+        case .extraExtraLarge:
+            .largeTitle
+        case .extraExtraExtraLarge:
+            .largeTitle
+        case .accessibilityLarge:
+            .largeTitle
+        }
+    }
+    //sets the size of the icons of the buttons to coordinate with the text size scale
+    
+    var sampleTextSize: DynamicTypeSize {
+        switch self {
+        case .small:
+            .small
+        case .medium:
+            .medium
+        case .large:
+            .large
+        case .extraLarge:
+            .xLarge
+        case .extraExtraLarge:
+            .xxLarge
+        case .extraExtraExtraLarge:
+            .xxxLarge
+        case .accessibilityLarge:
+            .accessibility1
+        }
+    }
+    //sets the size of the sample text to coorelate with the text size scale.
+}
+
+enum AppColorFilter: String, CaseIterable, Identifiable {
+    case none
+    case grayscale
+    case inverted
+    case invertedGrayscale
+    case redBlack
+    case yellowBlack
+    case blueWhite
+    //creates the cases
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .none:
+            "None"
+        case .grayscale:
+            "Grayscale"
+        case .inverted:
+            "Inverted"
+        case .invertedGrayscale:
+            "Inverted Grayscale"
+        case .redBlack:
+            "Red / Black"
+        case .yellowBlack:
+            "Yellow / Black"
+        case .blueWhite:
+            "Blue / White"
+    //sets the name that shows up on the filter panel
+        }
+    }
+}
+
+
+struct AppColorFilterModifier: ViewModifier {
+    let filter: AppColorFilter
+
+    func body(content: Content) -> some View {
+        switch filter {
+        case .none:
+            content
+        case .grayscale:
+            content.saturation(0)
+        case .inverted:
+            content.colorInvert()
+        case .invertedGrayscale:
+            content
+                .saturation(0)
+                .colorInvert()
+        case .redBlack:
+            content
+                .saturation(0)
+                .contrast(1.8)
+                .colorMultiply(.red)
+        case .yellowBlack:
+            content
+                .saturation(0)
+                .contrast(1.8)
+                .colorMultiply(.yellow)
+        case .blueWhite:
+            content
+                .saturation(0)
+                .contrast(1.5)
+                .colorInvert()
+                .colorMultiply(.blue)
+        }
+    }
+}
+//sets the actual filter to each case
+
+extension View {
+    func appColorFilter(_ filter: AppColorFilter) -> some View {
+        modifier(AppColorFilterModifier(filter: filter))
+    }
+}
+
+
+    
+#Preview {
+    ContentView()
+}
