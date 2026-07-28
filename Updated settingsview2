@@ -1,0 +1,97 @@
+import SwiftUI
+import AVFoundation
+
+struct settingsView: View {
+    @Environment(SpeechManager.self) private var speechManager
+    @Binding var textSize: AppTextSize
+    @Binding var colorFilter: AppColorFilter
+    @AppStorage("isTextToSpeechEnabled") private var isTextToSpeechEnabled = false
+    @AppStorage("appContrastBoost") private var contrastBoost = 0
+    @AppStorage("isDarkModeEnabled") private var isDarkModeEnabled = false
+    @State private var speechSynthesizer = AVSpeechSynthesizer()
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    SettingsTab(title: "Text Size", systemImage: "textformat.size") {
+                        TextSizeScale(textSize: $textSize)
+                    }
+
+                    SettingsTab(title: "Color Filter", systemImage: "camera.filters") {
+                        Picker("Color Filter", selection: $colorFilter) {
+                            ForEach(AppColorFilter.allCases) { filter in
+                                Text(filter.title).tag(filter)
+                            }
+                        }
+                        .pickerStyle(.wheel)
+                    }
+
+                    SettingsTab(title: "Text to Speech", systemImage: "speaker.wave.3.fill") {
+                        Toggle("Enable text-to-speech", isOn: Binding(get: {
+                        isTextToSpeechEnabled
+                    }, set: { newValue in
+                        isTextToSpeechEnabled = newValue
+                        speechManager.isEnabled = newValue
+                    }))
+
+                        Button {
+                            speak("Text to speech is working. Location names, labels, and screen text can be announced.")
+                        } label: {
+                            Text("Test Text-to-Speech")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!isTextToSpeechEnabled)
+                    }
+
+                    SettingsTab(title: "Higher Contrast", systemImage: "circle.lefthalf.filled") {
+                        HStack {
+                            Button {
+                                contrastBoost = max(0, contrastBoost - 1)
+                            } label: {
+                                Image(systemName: "minus")
+                                    .frame(width: 32, height: 32)
+                            }
+                            .buttonStyle(.bordered)
+
+                            Text("Level \(contrastBoost)")
+                                .frame(maxWidth: .infinity)
+
+                            Button {
+                                contrastBoost = min(3, contrastBoost + 1)
+                            } label: {
+                                Image(systemName: "plus")
+                                    .frame(width: 32, height: 32)
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                    }
+
+                    SettingsTab(title: "Dark Mode", systemImage: "moon.fill") {
+                        Toggle("Enable Dark Mode", isOn: $isDarkModeEnabled)
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .dynamicTypeSize(textSize.dynamicTypeSize)
+        .onAppear {
+            speechManager.isEnabled = isTextToSpeechEnabled
+        }
+    }
+
+    private func speak(_ text: String) {
+        guard isTextToSpeechEnabled else { return }
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        speechSynthesizer.stopSpeaking(at: .immediate)
+        speechSynthesizer.speak(utterance)
+    }
+}
+
+#Preview {
+    settingsView(textSize: .constant(.medium), colorFilter: .constant(.none))
+}
