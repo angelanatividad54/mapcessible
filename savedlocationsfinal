@@ -1,0 +1,536 @@
+import SwiftUI
+import PhotosUI
+import MapKit
+import Observation
+
+@Observable
+final class SavedLocationStore {
+    var changeNotifications: [SavedLocationChangeNotification] = []
+    var locations: [Location] = [
+        Location(name: "Richard J. Daley Branch Library", address: "3400 S Halsted St., Chicago, IL 60608", reviews: [
+            Review(author: "Mauryce", rating: 5, text: "Great wheelchair access and clear signage.", images: [], datePosted: fixedDate(year: 2024, month: 5, day: 20, hour: 11, minute: 45)),
+            Review(author: "Michelle", rating: 5, text: "Accessible entrance.", images: [], datePosted: fixedDate(year: 2024, month: 5, day: 21, hour: 14, minute: 30))
+        ]),
+        Location(name: "McGuane Park Fieldhouse", address: "2901 S Poplar Ave., Chicago, IL 60608", reviews: [
+            Review(author: "Angela", rating: 5, text: "The ramp to the fieldhouse makes it easy to enter the building", images: [], datePosted: fixedDate(year: 2024, month: 5, day: 22, hour: 9, minute: 5))
+        ]),
+        Location(name: "Cermak Fresh Market", address: "3033 S Halsted St, Chicago, IL 60608", reviews: []),
+        Location(name: "Mariano's", address: "3145 S Ashland Ave., Chicago, IL 60608", reviews: [
+            Review(author: "Michelle", rating: 3, text: "There is only one entrance which works well, but it can get crowded.", images: [], datePosted: fixedDate(year: 2024, month: 5, day: 22, hour: 18, minute: 0)),
+            Review(author: "Angela", rating: 5, text: "Automatic door works very well. I had no trouble getting through the door", images: [], datePosted: fixedDate(year: 2024, month: 5, day: 23, hour: 10, minute: 10))
+        ])
+    ]
+
+    func save(location: Location) {
+        if let index = locations.firstIndex(where: { $0.name == location.name && $0.address == location.address && $0.reviewLocationKey == location.reviewLocationKey }) {
+            locations[index] = location
+        } else {
+            locations.insert(location, at: 0)
+        }
+    }
+
+    func saveAccessibleFeature(name: String, approximateAddress: String, coordinate: CLLocationCoordinate2D, status: String = "Working Properly.") {
+        let location = Location(
+            name: name,
+            address: approximateAddress,
+            reviews: [],
+            kind: .accessibleFeature,
+            status: status,
+            latitude: coordinate.latitude,
+            longitude: coordinate.longitude
+        )
+        save(location: location)
+    }
+
+    func saveCustomPin(name: String, approximateAddress: String, coordinate: CLLocationCoordinate2D) {
+        let location = Location(
+            name: name,
+            address: approximateAddress,
+            reviews: [],
+            kind: .customPin,
+            latitude: coordinate.latitude,
+            longitude: coordinate.longitude
+        )
+        save(location: location)
+    }
+
+    func currentStatus(for name: String, coordinate: CLLocationCoordinate2D, defaultStatus: String = "Working Properly.") -> String {
+        let key = statusKey(name: name, coordinate: coordinate)
+        return accessibleFeatureStatuses[key] ?? defaultStatus
+    }
+
+    func updateAccessibleFeatureStatus(name: String, coordinate: CLLocationCoordinate2D, status: String) {
+        let key = statusKey(name: name, coordinate: coordinate)
+        accessibleFeatureStatuses[key] = status
+
+        if let index = locations.firstIndex(where: {
+            $0.kind == .accessibleFeature &&
+            $0.name == name &&
+            $0.latitude == coordinate.latitude &&
+            $0.longitude == coordinate.longitude
+        }) {
+            locations[index].status = status
+            changeNotifications.insert(
+                SavedLocationChangeNotification(
+                    featureName: locations[index].name,
+                    status: status
+                ),
+                at: 0
+            )
+        }
+    }
+
+    func dismissChangeNotification(_ notification: SavedLocationChangeNotification) {
+        changeNotifications.removeAll { $0.id == notification.id }
+    }
+
+    private var accessibleFeatureStatuses: [String: String] = [:]
+
+    private func statusKey(name: String, coordinate: CLLocationCoordinate2D) -> String {
+        "\(name)|\(coordinate.latitude)|\(coordinate.longitude)"
+    }
+}
+
+enum SavedLocationKind: String, Hashable {
+    case standard
+    case accessibleFeature
+    case customPin
+}
+
+struct SavedLocationChangeNotification: Identifiable, Hashable {
+    let id = UUID()
+    var featureName: String
+    var status: String
+}
+
+func fixedDate(year: Int, month: Int, day: Int, hour: Int = 12, minute: Int = 0) -> Date {
+    var components = DateComponents()
+    components.year = year
+    components.month = month
+    components.day = day
+    components.hour = hour
+    components.minute = minute
+    components.calendar = Calendar(identifier: .gregorian)
+    return components.date ?? Date(timeIntervalSince1970: 0)
+}
+
+// Simple models to keep this demo self-contained
+struct Location: Identifiable, Hashable {
+    let id = UUID()
+    var name: String
+    var address: String
+    var reviews: [Review]
+    var kind: SavedLocationKind
+    var status: String
+    var latitude: Double?
+    var longitude: Double?
+    var reviewLocationKey: String?
+
+    init(
+        name: String,
+        address: String,
+        reviews: [Review],
+        kind: SavedLocationKind = .standard,
+        status: String = "Working Properly.",
+        latitude: Double? = nil,
+        longitude: Double? = nil,
+        reviewLocationKey: String? = nil
+    ) {
+        self.name = name
+        self.address = address
+        self.reviews = reviews
+        self.kind = kind
+        self.status = status
+        self.latitude = latitude
+        self.longitude = longitude
+        self.reviewLocationKey = reviewLocationKey
+    }
+}
+
+struct Review: Identifiable, Hashable {
+    let id = UUID()
+    var author: String
+    var rating: Int // 1...5
+    var text: String
+    var images: [Image] = [] // Optional photos
+    var isReport: Bool = false
+    var datePosted: Date = Date()
+
+    static func == (lhs: Review, rhs: Review) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+}
+
+struct savedLocations: View {
+    @Environment(AppData.self) private var appData
+    @Bindable var store: SavedLocationStore
+    // Notification permission state (mocked for demo)
+    @State private var showNotificationBanner: Bool = true
+    @State private var notificationsAllowed: Bool? = nil // nil = not decided, true/false decided
+
+    // Selection / presentation
+    @State private var selectedLocation: Location? = nil
+    
+    // Added state for delete confirmation
+    @State private var pendingDeleteOffsets: IndexSet? = nil
+    @State private var showDeleteAlert: Bool = false
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                if !store.changeNotifications.isEmpty {
+                    VStack(spacing: 12) {
+                        ForEach(store.changeNotifications) { notification in
+                            ChangeNotificationBanner(
+                                notification: notification,
+                                dismissAction: {
+                                    store.dismissChangeNotification(notification)
+                                }
+                            )
+                        }
+                    }
+                    .padding(.top)
+                }
+
+                if showNotificationBanner && notificationsAllowed == nil {
+                    NotificationPermissionBanner(
+                        allowAction: {
+                            notificationsAllowed = true
+                            withAnimation { showNotificationBanner = false }
+                            // In a real app, trigger UNUserNotificationCenter authorization here
+                        },
+                        denyAction: {
+                            notificationsAllowed = false
+                            withAnimation { showNotificationBanner = false }
+                        }
+                    )
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+
+                List {
+                    Section(header: Text("Saved Locations")) {
+                        ForEach(store.locations) { location in
+                            Button {
+                                selectedLocation = location
+                            } label: {
+                                HStack(alignment: .top, spacing: 12) {
+                                    Image(systemName: "mappin.circle.fill")
+                                        .font(.system(size: 28))
+                                        .foregroundStyle(.tint)
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(location.name)
+                                            .font(.headline)
+                                        Text(location.address)
+                                            .font(.subheadline)
+                                            .foregroundStyle(.secondary)
+                                        if location.kind == .accessibleFeature {
+                                            Text(location.status)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        let reviews = reviews(for: location)
+                                        if !reviews.isEmpty {
+                                            HStack(spacing: 6) {
+                                                Image(systemName: "star.fill").font(.caption2)
+                                                Text(averageRatingText(for: location))
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        } else {
+                                            Text("No reviews yet")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .font(.footnote)
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                        }
+                        .onDelete { offsets in
+                            pendingDeleteOffsets = offsets
+                            showDeleteAlert = true
+                        }
+                    }
+                }
+                .listStyle(.insetGrouped)
+                .padding(.top, store.changeNotifications.isEmpty ? 0 : 18)
+            }
+            .navigationTitle("Saved Locations")
+            .sheet(item: $selectedLocation) { location in
+                let binding = Binding(
+                    get: { store.locations.first(where: { $0.id == location.id }) ?? location },
+                    set: { updated in
+                        if let idx = store.locations.firstIndex(where: { $0.id == location.id }) {
+                            store.locations[idx] = updated
+                        }
+                    }
+                )
+                ReviewsSheet(
+                    location: binding,
+                    onDismiss: { selectedLocation = nil }
+                )
+                .presentationDetents([.medium, .large])
+            }
+            .alert("Delete this location?", isPresented: $showDeleteAlert) {
+                Button("Delete", role: .destructive) {
+                    if let offsets = pendingDeleteOffsets {
+                        store.locations.remove(atOffsets: offsets)
+                        pendingDeleteOffsets = nil
+                    }
+                }
+                Button("Cancel", role: .cancel) {
+                    pendingDeleteOffsets = nil
+                }
+            } message: {
+                Text("This will delete the selected location and you will not be notified anymore.")
+            }
+        }
+    }
+
+    private func averageRatingText(for location: Location) -> String {
+        let ratings = ratingValues(for: location)
+        guard !ratings.isEmpty else { return "No reviews yet" }
+        let avg = ratings.reduce(0, +) / Double(ratings.count)
+        return String(format: "%.1f avg (%d)", avg, ratings.count)
+    }
+
+    private func ratingValues(for location: Location) -> [Double] {
+        reviews(for: location).map { Double($0.rating) }
+    }
+
+    private func reviews(for location: Location) -> [Review] {
+        if let reviewLocationKey = location.reviewLocationKey {
+            return appData.reviews(for: reviewLocationKey).map { storedReview in
+                Review(
+                    author: storedReview.displayName,
+                    rating: storedReview.rating,
+                    text: storedReview.comment,
+                    images: [],
+                    isReport: false,
+                    datePosted: storedReview.date
+                )
+            }
+        }
+        return location.reviews
+    }
+
+}
+
+// MARK: - Notification Permission Banner
+struct NotificationPermissionBanner: View {
+    var allowAction: () -> Void
+    var denyAction: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: "bell.badge.fill")
+                    .imageScale(.large)
+                    .foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Get notified of new changes")
+                        .font(.headline)
+                    Text("Allow notifications only when a saved accessible feature changes status.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            HStack {
+                Button("Don't Allow") { denyAction() }
+                    .buttonStyle(.bordered)
+                Button("Allow") { allowAction() }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding()
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .padding([.horizontal, .top])
+    }
+}
+
+struct ChangeNotificationBanner: View {
+    var notification: SavedLocationChangeNotification
+    var dismissAction: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .imageScale(.large)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("New Change to a Saved Accessible Feature:")
+                    .font(.headline)
+                Text(notification.status)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Button(action: dismissAction) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
+                    .imageScale(.medium)
+            }
+        }
+        .padding()
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .padding(.horizontal)
+    }
+}
+
+// MARK: - Reviews Sheet
+struct ReviewsSheet: View {
+    @Environment(AppData.self) private var appData
+    @Binding var location: Location
+    var onDismiss: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                if let reviewLocationKey = location.reviewLocationKey {
+                    let reviews = appData.reviews(for: reviewLocationKey)
+                    if reviews.isEmpty {
+                        ContentUnavailableView(
+                            "No Reviews Yet",
+                            systemImage: "text.bubble",
+                            description: Text("Be the first to share accessibility details for this location.")
+                        )
+                        .frame(maxHeight: .infinity)
+                    } else {
+                        List {
+                            Section(header: Text("Reviews")) {
+                                ForEach(reviews) { review in
+                                    StoredReviewRow(review: review) {
+                                        appData.likeReview(locationKey: review.locationKey, reviewID: review.id)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if location.reviews.isEmpty {
+                    ContentUnavailableView(
+                        "No Reviews Yet",
+                        systemImage: "text.bubble",
+                        description: Text("Be the first to share accessibility details for this location.")
+                    )
+                    .frame(maxHeight: .infinity)
+                } else {
+                    List {
+                        Section(header: Text("Reviews")) {
+                            ForEach(location.reviews) { review in
+                                ReviewRow(review: review)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle(location.name)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { onDismiss() }
+                }
+            }
+        }
+    }
+}
+
+struct StoredReviewRow: View {
+    var review: StoredReview
+    var likeAction: () -> Void = {}
+
+    private let formatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(review.displayName)
+                        .font(.subheadline)
+                    Text(formatter.string(from: review.date))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Text(String(repeating: "★", count: max(0, review.rating)))
+                    .font(.caption)
+                    .foregroundStyle(.yellow)
+            }
+
+            Text(review.comment)
+
+            Button(action: likeAction) {
+                Label("\(review.likes)", systemImage: "hand.thumbsup.fill")
+                    .foregroundStyle(.blue)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.vertical, 6)
+    }
+}
+
+struct ReviewRow: View {
+    var review: Review
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top) {
+                Image(systemName: review.isReport ? "exclamationmark.bubble.fill" : "person.circle.fill")
+                    .foregroundStyle(review.isReport ? .orange : .secondary)
+                VStack(alignment: .leading, spacing: 2){
+                    Text(review.author)
+                        .font(.subheadline)
+                    Text(review.datePosted.formatted(
+                        date: .abbreviated,
+                        time: .shortened
+                    ))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                }
+                
+                Spacer()
+                
+                Text(String(repeating: "★", count: max(0, review.rating)))
+                    .font(.caption)
+                    .foregroundStyle(.yellow)
+            }
+            if !review.images.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(review.images.indices, id: \.self) { i in
+                            review.images[i]
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: 200, height: 140)
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                        }
+                    }
+                }
+            }
+            Text(review.text)
+        }
+        .padding(.vertical, 6)
+    }
+}
+
+#Preview {
+    savedLocations(store: SavedLocationStore())
+}
