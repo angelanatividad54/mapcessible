@@ -1,0 +1,52 @@
+import SwiftUI
+
+struct tabView: View {
+    @State private var appData = AppData()
+    @State private var speechManager = SpeechManager()
+    @State private var savedLocationStore = SavedLocationStore()
+    @State private var textSize: AppTextSize = .medium
+    @State private var colorFilter: AppColorFilter = .none
+    @AppStorage("appContrastBoost") private var contrastBoost: Int = 0
+    @AppStorage("isDarkModeEnabled") private var isDarkModeEnabled = false
+    @AppStorage("isTextToSpeechEnabled") private var isTextToSpeechEnabled = false
+    
+    var body: some View {
+        TabView {
+            ContentView(
+                textSize: $textSize,
+                colorFilter: $colorFilter,
+                savedLocationStore: savedLocationStore
+            )
+                .tabItem{
+                    Image(systemName: "map.fill")
+                    Text("Map")
+                }
+            savedLocations(store: savedLocationStore)
+                .tabItem{
+                    Image(systemName: "bookmark.fill")
+                    Text("Saved")
+                }
+            settingsView(textSize: $textSize, colorFilter: $colorFilter)
+                .tabItem{
+                    Image(systemName: "gearshape.fill")
+                    Text("Settings")
+                }
+        }
+        .environment(appData)
+        .environment(speechManager)
+        .dynamicTypeSize(textSize.dynamicTypeSize)
+        .appColorFilter(colorFilter)
+        .contrast(max(1.0, 1.0 + Double(contrastBoost) * 0.15))
+        .preferredColorScheme(isDarkModeEnabled ? .dark : nil)
+        .onAppear {
+            speechManager.isEnabled = isTextToSpeechEnabled
+        }
+        .onChange(of: isTextToSpeechEnabled) { _, newValue in
+            speechManager.isEnabled = newValue
+        }
+    }
+}
+
+#Preview {
+    tabView()
+}
