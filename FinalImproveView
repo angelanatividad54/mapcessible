@@ -1,0 +1,314 @@
+import SwiftUI
+import PhotosUI
+import UIKit
+import UniformTypeIdentifiers
+
+struct ImproveView: View {
+    @Environment(AppData.self) private var appData
+    @Environment(SpeechManager.self) private var speechManager
+    @Environment(\.dismiss) private var dismiss
+
+    let locationKey: String
+    let locationName: String
+    let textSize: AppTextSize
+
+    @State private var suggestionTitle = ""
+    @State private var suggestionText = ""
+    @State private var selectedImageData: [Data] = []
+    @State private var showPhotoOptions = false
+    @State private var showPhotosPicker = false
+    @State private var showFileImporter = false
+    @State private var photoItems: [PhotosPickerItem] = []
+    @State private var alertMessage: String?
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    Text("Improvements")
+                        .font(.largeTitle.bold())
+
+                    Text("Suggest an improvement")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+
+                    suggestionComposer
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Previous Improvements")
+                            .font(.headline)
+
+                        if improvements.isEmpty {
+                            Text("No suggestions yet.")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            improvementList
+                        }
+                    }
+                }
+                .padding()
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "chevron.left")
+                    }
+                }
+            }
+            .dynamicTypeSize(textSize.dynamicTypeSize)
+            .confirmationDialog("Add Photo", isPresented: $showPhotoOptions, titleVisibility: .visible) {
+                Button("Photos") {
+                    showPhotosPicker = true
+                }
+                Button("Files") {
+                    showFileImporter = true
+                }
+                Button("Cancel", role: .cancel) { }
+            }
+            .photosPicker(
+                isPresented: $showPhotosPicker,
+                selection: $photoItems,
+                maxSelectionCount: 5,
+                selectionBehavior: .continuous,
+                matching: .images,
+                preferredItemEncoding: .current
+            )
+            .fileImporter(
+                isPresented: $showFileImporter,
+                allowedContentTypes: [.image],
+                allowsMultipleSelection: true
+            ) { result in
+                switch result {
+                case .success(let urls):
+                    Task { await loadFiles(urls) }
+                case .failure:
+                    break
+                }
+            }
+            .onChange(of: photoItems) { _, newItems in
+                Task { await loadPhotos(newItems) }
+            }
+            .alert("Notice", isPresented: Binding(get: { alertMessage != nil }, set: { if !$0 { alertMessage = nil } })) {
+                Button("OK", role: .cancel) { alertMessage = nil }
+            } message: {
+                Text(alertMessage ?? "")
+            }
+            .onAppear {
+                readImprovementsIfNeeded()
+            }
+            .onChange(of: improvements) { _, _ in
+                readImprovementsIfNeeded()
+            }
+        }
+    }
+
+    private var improvements: [StoredImprovement] {
+        appData.improvements(for: locationKey)
+    }
+
+    private var suggestionComposer: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            TextField("Title", text: $suggestionTitle)
+                .textFieldStyle(.roundedBorder)
+
+            TextEditor(text: $suggestionText)
+                .frame(minHeight: 130)
+                .padding(8)
+                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
+
+            Button {
+                showPhotoOptions = true
+            } label: {
+                Label("Add Photo", systemImage: "photo.on.rectangle")
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.blue)
+            .speechAnnouncement("Add Photo")
+
+            if !selectedImageData.isEmpty {
+                selectedImageStrip
+            }
+
+            Button {
+                postSuggestion()
+            } label: {
+                Text("Post Suggestion")
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.blue)
+            .speechAnnouncement("Post Suggestion")
+            .disabled(
+                suggestionTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                suggestionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            )
+        }
+        .padding()
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private var improvementList: some View {
+        LazyVStack(spacing: 12) {
+            ForEach(improvements, id: \.id) { improvement in
+                improvementRow(for: improvement)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func improvementRow(for improvement: StoredImprovement) -> some View {
+        let isHighlighted = speechManager.highlightedIdentifier == improvement.id.uuidString
+        ImprovementCard(
+            improvement: improvement,
+            isHighlighted: isHighlighted
+        )
+    }
+
+    private var selectedImageStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
+                ForEach(Array(selectedImageData.enumerated()), id: \.offset) { _, data in
+                    improvementThumbnail(for: data)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func improvementThumbnail(for data: Data) -> some View {
+        if let image = UIImage(data: data) {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 84, height: 84)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
+    private func postSuggestion() {
+        let title = suggestionTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let details = suggestionText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, !details.isEmpty else { return }
+
+        appData.addImprovement(
+            locationKey: locationKey,
+            locationName: locationName,
+            title: title,
+            details: details,
+            imageData: selectedImageData
+        )
+
+        alertMessage = "Suggestion posted."
+        suggestionTitle = ""
+        suggestionText = ""
+        selectedImageData = []
+        photoItems = []
+    }
+
+    private func loadPhotos(_ items: [PhotosPickerItem]) async {
+        var data: [Data] = []
+        for item in items {
+            if let itemData = try? await item.loadTransferable(type: Data.self) {
+                data.append(itemData)
+            }
+        }
+        await MainActor.run {
+            selectedImageData = data
+        }
+    }
+
+    private func loadFiles(_ urls: [URL]) async {
+        var data: [Data] = []
+        for url in urls {
+            let access = url.startAccessingSecurityScopedResource()
+            defer {
+                if access { url.stopAccessingSecurityScopedResource() }
+            }
+            if let itemData = try? Data(contentsOf: url) {
+                data.append(itemData)
+            }
+        }
+        await MainActor.run {
+            selectedImageData = data
+        }
+    }
+
+    private func readImprovementsIfNeeded() {
+        guard speechManager.isEnabled else { return }
+        let segments = improvements.enumerated().map { index, improvement in
+            SpeechSegment(
+                id: improvement.id.uuidString,
+                text: "Improvement \(index + 1). \(improvement.title). \(improvement.details)"
+            )
+        }
+        speechManager.speak(segments: segments)
+    }
+}
+
+private struct ImprovementCard: View {
+    let improvement: StoredImprovement
+    let isHighlighted: Bool
+
+    private let formatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(improvement.title)
+                    .font(.headline)
+                Spacer()
+                Text(formatter.string(from: improvement.date))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(improvement.details)
+
+            if !improvement.imageData.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(Array(improvement.imageData.enumerated()), id: \.offset) { _, data in
+                            if let image = UIImage(data: data) {
+                                Image(uiImage: image)
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: 96, height: 96)
+                                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .padding()
+        .background(AnyShapeStyle(.thinMaterial), in: RoundedRectangle(cornerRadius: 16))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(isHighlighted ? Color.yellow.opacity(0.16) : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(isHighlighted ? Color.yellow : Color.clear, lineWidth: 2)
+        )
+    }
+}
+
+#Preview {
+    ImproveView(
+        locationKey: "Sample",
+        locationName: "Sample Location",
+        textSize: .medium
+    )
+    .environment(AppData())
+}
