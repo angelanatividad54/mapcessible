@@ -1,0 +1,293 @@
+import Foundation
+import CoreLocation
+import Observation
+import AVFoundation
+import SwiftUI
+
+struct StoredReview: Identifiable, Codable, Hashable {
+    let id: UUID
+    var locationKey: String
+    var locationName: String
+    var displayName: String
+    var anonymous: Bool
+    var rating: Int
+    var comment: String
+    var date: Date
+    var imageData: [Data]
+    var likes: Int
+
+    init(
+        id: UUID = UUID(),
+        locationKey: String,
+        locationName: String,
+        displayName: String,
+        anonymous: Bool,
+        rating: Int,
+        comment: String,
+        date: Date = Date(),
+        imageData: [Data] = [],
+        likes: Int = 0
+    ) {
+        self.id = id
+        self.locationKey = locationKey
+        self.locationName = locationName
+        self.displayName = displayName
+        self.anonymous = anonymous
+        self.rating = rating
+        self.comment = comment
+        self.date = date
+        self.imageData = imageData
+        self.likes = likes
+    }
+}
+
+struct StoredImprovement: Identifiable, Codable, Hashable {
+    let id: UUID
+    var locationKey: String
+    var locationName: String
+    var title: String
+    var details: String
+    var date: Date
+    var imageData: [Data]
+
+    init(
+        id: UUID = UUID(),
+        locationKey: String,
+        locationName: String,
+        title: String,
+        details: String,
+        date: Date = Date(),
+        imageData: [Data] = []
+    ) {
+        self.id = id
+        self.locationKey = locationKey
+        self.locationName = locationName
+        self.title = title
+        self.details = details
+        self.date = date
+        self.imageData = imageData
+    }
+}
+
+@MainActor
+@Observable
+final class AppData {
+    var reviewsByLocation: [String: [StoredReview]] = [:]
+    var improvementsByLocation: [String: [StoredImprovement]] = [:]
+
+    private let reviewsKey = "StoredReviewsByLocation"
+    private let improvementsKey = "StoredImprovementsByLocation"
+
+    init() {
+        load()
+    }
+
+    func reviews(for locationKey: String) -> [StoredReview] {
+        reviewsByLocation[locationKey, default: []].sorted { $0.date > $1.date }
+    }
+
+    func improvements(for locationKey: String) -> [StoredImprovement] {
+        improvementsByLocation[locationKey, default: []].sorted { $0.date > $1.date }
+    }
+
+    func addReview(
+        locationKey: String,
+        locationName: String,
+        displayName: String,
+        anonymous: Bool,
+        rating: Int,
+        comment: String,
+        imageData: [Data]
+    ) {
+        let review = StoredReview(
+            locationKey: locationKey,
+            locationName: locationName,
+            displayName: normalizedDisplayName(from: displayName, anonymous: anonymous),
+            anonymous: anonymous,
+            rating: rating,
+            comment: comment,
+            imageData: imageData
+        )
+        reviewsByLocation[locationKey, default: []].insert(review, at: 0)
+        save()
+    }
+
+    func likeReview(locationKey: String, reviewID: UUID) {
+        guard var reviews = reviewsByLocation[locationKey],
+              let index = reviews.firstIndex(where: { $0.id == reviewID }) else {
+            return
+        }
+
+        reviews[index].likes += 1
+        reviewsByLocation[locationKey] = reviews
+        save()
+    }
+
+    func addImprovement(
+        locationKey: String,
+        locationName: String,
+        title: String,
+        details: String,
+        imageData: [Data]
+    ) {
+        let improvement = StoredImprovement(
+            locationKey: locationKey,
+            locationName: locationName,
+            title: title,
+            details: details,
+            imageData: imageData
+        )
+        improvementsByLocation[locationKey, default: []].insert(improvement, at: 0)
+        save()
+    }
+
+    func locationKey(name: String, coordinate: CLLocationCoordinate2D?) -> String {
+        if let coordinate {
+            return "\(name)|\(coordinate.latitude)|\(coordinate.longitude)"
+        }
+        return name
+    }
+
+    func normalizedDisplayName(from rawName: String, anonymous: Bool) -> String {
+        guard !anonymous else { return "Anonymous" }
+
+        let parts = rawName
+            .split(whereSeparator: \.isWhitespace)
+            .map(String.init)
+            .filter { !$0.isEmpty }
+
+        switch parts.count {
+        case 0:
+            return "Anonymous"
+        case 1:
+            return parts[0]
+        default:
+            let firstName = parts[0]
+            let lastInitial = parts.last?.prefix(1) ?? ""
+            return "\(firstName) \(lastInitial)."
+        }
+    }
+
+    private func save() {
+        if let encoded = try? JSONEncoder().encode(reviewsByLocation) {
+            UserDefaults.standard.set(encoded, forKey: reviewsKey)
+        }
+        if let encoded = try? JSONEncoder().encode(improvementsByLocation) {
+            UserDefaults.standard.set(encoded, forKey: improvementsKey)
+        }
+    }
+
+    private func load() {
+        if let data = UserDefaults.standard.data(forKey: reviewsKey),
+           let decoded = try? JSONDecoder().decode([String: [StoredReview]].self, from: data) {
+            reviewsByLocation = decoded
+        }
+
+        if let data = UserDefaults.standard.data(forKey: improvementsKey),
+           let decoded = try? JSONDecoder().decode([String: [StoredImprovement]].self, from: data) {
+            improvementsByLocation = decoded
+        }
+    }
+}
+
+struct SpeechSegment: Identifiable, Hashable {
+    let id: String
+    let text: String
+}
+
+@MainActor
+@Observable
+final class SpeechManager: NSObject, AVSpeechSynthesizerDelegate {
+    var isEnabled = false
+    var highlightedIdentifier: String?
+
+    private let synthesizer = AVSpeechSynthesizer()
+    private var queue: [SpeechSegment] = []
+
+    override init() {
+        super.init()
+        synthesizer.delegate = self
+    }
+
+    func announce(_ text: String, identifier: String? = nil) {
+        guard isEnabled else { return }
+        stop()
+        highlightedIdentifier = identifier
+        synthesizer.speak(makeUtterance(for: text))
+    }
+
+    func speak(segments: [SpeechSegment]) {
+        guard isEnabled else { return }
+        stop()
+        queue = segments
+        speakNextSegment()
+    }
+
+    func stop() {
+        queue.removeAll()
+        highlightedIdentifier = nil
+        if synthesizer.isSpeaking {
+            synthesizer.stopSpeaking(at: .immediate)
+        }
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        Task { @MainActor [weak self] in
+            self?.speakNextSegment()
+        }
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        Task { @MainActor [weak self] in
+            self?.queue.removeAll()
+            self?.highlightedIdentifier = nil
+        }
+    }
+
+    private func speakNextSegment() {
+        guard !queue.isEmpty else {
+            highlightedIdentifier = nil
+            return
+        }
+
+        let segment = queue.removeFirst()
+        highlightedIdentifier = segment.id
+        synthesizer.speak(makeUtterance(for: segment.text))
+    }
+
+    private func makeUtterance(for text: String) -> AVSpeechUtterance {
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.9
+        return utterance
+    }
+}
+
+private struct SpeechAnnouncementModifier: ViewModifier {
+    @Environment(SpeechManager.self) private var speechManager
+    let label: String
+
+    func body(content: Content) -> some View {
+        content
+            .onHover { isHovering in
+                if isHovering {
+                    speechManager.announce(label, identifier: label)
+                }
+            }
+            .simultaneousGesture(
+                LongPressGesture(minimumDuration: 0.35).onEnded { _ in
+                    speechManager.announce(label, identifier: label)
+                }
+            )
+    }
+}
+
+extension View {
+    func speechAnnouncement(_ label: String) -> some View {
+        modifier(SpeechAnnouncementModifier(label: label))
+    }
+}
+
+#Preview {
+    Text("AppData")
+}
