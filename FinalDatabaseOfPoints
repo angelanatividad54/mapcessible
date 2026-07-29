@@ -1,0 +1,191 @@
+import Foundation
+import SwiftData
+import MapKit
+
+class bench: Identifiable {
+    var id: UUID
+    var latitude: Double
+    var longitude: Double
+    
+    init(latitude: Double, longitude: Double) {
+        self.id = UUID()
+        self.latitude = latitude
+        self.longitude = longitude
+    }
+    
+    // Computed property to convert Doubles to CLLocationCoordinate2D
+    var coordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+    }
+}
+
+var  benchLocation: [bench] = [
+    bench(latitude: 41.83895, longitude: -87.64093),
+    bench(latitude: 41.83837, longitude: -87.64151),
+    bench(latitude: 41.83836, longitude: -87.64134),
+    bench(latitude: 41.83828, longitude: -87.64152),
+    bench(latitude: 41.83819, longitude: -87.64293),
+    bench(latitude: 41.83836, longitude: -87.64283),
+    bench(latitude: 41.83772, longitude: -87.64640),
+    bench(latitude: 41.83995, longitude: -87.64645),
+    bench(latitude: 41.84098, longitude: -87.64648),
+    bench(latitude: 41.8277991, longitude: -87.6478083),
+    bench(latitude: 41.828317, longitude: -87.647990),
+    bench(latitude: 41.8283097, longitude: -87.6478462),
+    bench(latitude: 41.8281363, longitude: -87.6479947),
+    bench(latitude: 41.8285471, longitude: -87.6479656),
+    bench(latitude: 41.828310, longitude: -87.647846),
+    bench(latitude: 41.828256, longitude: -87.647805),
+    bench(latitude: 41.827498, longitude: -87.646102),
+    bench(latitude: 41.827001, longitude: -87.641064),
+    bench(latitude: 41.827315, longitude: -87.641241),
+    bench(latitude: 41.8270571, longitude: -87.6410170),
+    bench(latitude: 41.829084, longitude: -87.641639),
+    bench(latitude: 41.8291099, longitude: -87.6414099),
+    bench(latitude: 41.8293835, longitude: -87.6413224),
+    bench(latitude: 41.836000, longitude: -87.652250),
+    bench(latitude: 41.831806, longitude: -87.654500),
+    bench(latitude: 41.83225, longitude: -87.65381),
+    bench(latitude: 41.839372, longitude: -87.662923),
+    bench(latitude: 41.843413, longitude: -87.654602),
+    bench(latitude: 41.840325, longitude: -87.646503),
+    bench(latitude: 41.839972, longitude: -87.646889),
+    bench(latitude: 41.840274, longitude: -87.648493),
+    bench(latitude: 41.843261, longitude: -87.650013),
+    bench(latitude: 41.842789, longitude: -87.647901),
+    bench(latitude: 41.843883, longitude: -87.661350),
+    bench(latitude: 41.843986, longitude: -87.661155),
+    bench(latitude: 41.845358, longitude: -87.640101)
+
+]
+
+class ramp: Identifiable {
+    var id: UUID
+    var latitude: Double
+    var longitude: Double
+    
+    init(latitude: Double, longitude: Double) {
+        self.id = UUID()
+        self.latitude = latitude
+        self.longitude = longitude
+    }
+    
+    // Computed property to convert Doubles to CLLocationCoordinate2D
+    var coordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+    }
+}
+
+var rampLocation: [ramp] = [
+    ramp(latitude: 41.84093, longitude: -87.64604),
+    ramp(latitude: 41.83872, longitude: 87.64641),
+    ramp(latitude: 41.8285238, longitude: -87.6478841),
+    ramp(latitude: 41.829084, longitude: -87.641639),
+    ramp(latitude: 41.839175, longitude: -87.646215)
+]
+
+class door: Identifiable {
+    var id: UUID
+    var latitude: Double
+    var longitude: Double
+    
+    init(latitude: Double, longitude: Double) {
+        self.id = UUID()
+        self.latitude = latitude
+        self.longitude = longitude
+    }
+    
+    // Computed property to convert Doubles to CLLocationCoordinate2D
+    var coordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+    }
+}
+
+var doorLocation: [door] = [
+    door(latitude: 41.83787, longitude: -87.64555),
+    door(latitude: 41.83912, longitude: -87.64611),
+    door(latitude: 41.83953, longitude: -87.64673),
+    door(latitude: 41.823579, longitude: -87.645724),
+    door(latitude: 41.827106, longitude: -87.643361),
+    door(latitude: 41.827260, longitude: -87.641255),
+    door(latitude: 41.831889, longitude: -87.646278),
+    door(latitude: 41.832583, longitude: -87.646278)
+
+]
+
+class parking: Identifiable {
+    var id: UUID
+    var latitude: Double
+    var longitude: Double
+    
+    init(latitude: Double, longitude: Double) {
+        self.id = UUID()
+        self.latitude = latitude
+        self.longitude = longitude
+    }
+    
+    // Computed property to convert Doubles to CLLocationCoordinate2D
+    var coordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+    }
+}
+
+var parkingLocation: [parking] = [
+    parking(latitude: 41.8236230, longitude: -87.6455164),
+    parking(latitude: 41.827087, longitude: -87.643055),
+    parking(latitude: 41.827287, longitude: -87.641588),
+    parking(latitude: 41.839156, longitude: -87.646776),
+    parking(latitude: 41.839188, longitude: -87.646797),
+    parking(latitude: 41.839230, longitude: -87.646691),
+    parking(latitude: 41.839410, longitude: -87.646799),
+    parking(latitude: 41.839401, longitude: -87.646705),
+    parking(latitude: 41.839464, longitude: -87.646708),
+    parking(latitude: 41.839730, longitude: -87.646782),
+    parking(latitude: 41.839260, longitude: -87.646036),
+    parking(latitude: 41.839259, longitude: -87.645977),
+    parking(latitude: 41.839250, longitude: -87.645918),
+    parking(latitude: 41.839958, longitude: -87.646880)
+]
+
+class elevator: Identifiable {
+    var id: UUID
+    var latitude: Double
+    var longitude: Double
+    
+    init(latitude: Double, longitude: Double) {
+        self.id = UUID()
+        self.latitude = latitude
+        self.longitude = longitude
+    }
+    
+    // Computed property to convert Doubles to CLLocationCoordinate2D
+    var coordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+    }
+}
+
+var elevatorLocation: [elevator] = [
+    elevator(latitude: 41.83890, longitude: -87.64620),
+    // change these cuz these r not real
+]
+
+class crosswalk: Identifiable {
+    var id: UUID
+    var latitude: Double
+    var longitude: Double
+    
+    init(latitude: Double, longitude: Double) {
+        self.id = UUID()
+        self.latitude = latitude
+        self.longitude = longitude
+    }
+    
+    // Computed property to convert Doubles to CLLocationCoordinate2D
+    var coordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+    }
+}
+
+var crosswalkLocation: [crosswalk] = [
+    crosswalk(latitude: 41.827148, longitude: -87.643567)
+]
