@@ -1,0 +1,380 @@
+import SwiftUI
+import PhotosUI
+import UIKit
+import UniformTypeIdentifiers
+
+struct ReviewsView: View {
+    @Environment(AppData.self) private var appData
+    @Environment(SpeechManager.self) private var speechManager
+    @Environment(\.dismiss) private var dismiss
+
+    let locationKey: String
+    let locationName: String
+    let textSize: AppTextSize
+
+    @State private var nameText = ""
+    @State private var anonymous = false
+    @State private var rating = 0
+    @State private var commentText = ""
+    @State private var selectedImageData: [Data] = []
+    @State private var showPhotoOptions = false
+    @State private var showPhotosPicker = false
+    @State private var showFileImporter = false
+    @State private var photoItems: [PhotosPickerItem] = []
+    @State private var alertMessage: String?
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    Text("Reviews")
+                        .font(.largeTitle.bold())
+
+                    Text("Add a review")
+                        .font(.headline)
+
+                    reviewComposer
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Previous Reviews")
+                            .font(.headline)
+
+                        if reviews.isEmpty {
+                            Text("No reviews yet.")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            reviewList
+                        }
+                    }
+                }
+                .padding()
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "chevron.left")
+                    }
+                }
+            }
+            .dynamicTypeSize(textSize.dynamicTypeSize)
+            .confirmationDialog("Add Photo", isPresented: $showPhotoOptions, titleVisibility: .visible) {
+                Button("Photos") {
+                    showPhotosPicker = true
+                }
+                Button("Files") {
+                    showFileImporter = true
+                }
+                Button("Cancel", role: .cancel) { }
+            }
+            .photosPicker(
+                isPresented: $showPhotosPicker,
+                selection: $photoItems,
+                maxSelectionCount: 5,
+                selectionBehavior: .continuous,
+                matching: .images,
+                preferredItemEncoding: .current
+            )
+            .fileImporter(
+                isPresented: $showFileImporter,
+                allowedContentTypes: [.image],
+                allowsMultipleSelection: true
+            ) { result in
+                switch result {
+                case .success(let urls):
+                    Task { await loadFiles(urls) }
+                case .failure:
+                    break
+                }
+            }
+            .onChange(of: photoItems) { _, newItems in
+                Task { await loadPhotos(newItems) }
+            }
+            .alert("Notice", isPresented: Binding(get: { alertMessage != nil }, set: { if !$0 { alertMessage = nil } })) {
+                Button("OK", role: .cancel) { alertMessage = nil }
+            } message: {
+                Text(alertMessage ?? "")
+            }
+            .onAppear {
+                nameText = ""
+                readReviewsIfNeeded()
+            }
+            .onChange(of: reviews) { _, _ in
+                readReviewsIfNeeded()
+            }
+        }
+    }
+
+    private var reviews: [StoredReview] {
+        appData.reviews(for: locationKey)
+    }
+
+    private var reviewList: some View {
+        LazyVStack(spacing: 12) {
+            ForEach(reviews, id: \.id) { review in
+                reviewRow(for: review)
+            }
+        }
+    }
+
+    private var reviewComposer: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                TextField("Edit Name", text: $nameText)
+                    .textFieldStyle(.roundedBorder)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Anonymous")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Toggle("Anonymous", isOn: $anonymous)
+                        .labelsHidden()
+                        .accessibilityLabel("Anonymous")
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 14) {
+                StarRating(rating: $rating)
+
+                TextEditor(text: $commentText)
+                    .frame(minHeight: 110)
+                    .padding(8)
+                    .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 14))
+
+                Button {
+                    showPhotoOptions = true
+                } label: {
+                    Label("Add Photo", systemImage: "photo.on.rectangle")
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.blue)
+                .speechAnnouncement("Add Photo")
+
+                if !selectedImageData.isEmpty {
+                    selectedImageStrip
+                }
+
+                Button {
+                    postReview()
+                } label: {
+                    Text("Post Review")
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.blue)
+                .speechAnnouncement("Post Review")
+                .disabled(commentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || rating == 0)
+            }
+            .padding()
+            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 20))
+        }
+    }
+
+    @ViewBuilder
+    private func reviewRow(for review: StoredReview) -> some View {
+        let isHighlighted = speechManager.highlightedIdentifier == review.id.uuidString
+        ReviewCard(
+            review: review,
+            isHighlighted: isHighlighted
+        ) {
+            appData.likeReview(locationKey: locationKey, reviewID: review.id)
+        }
+    }
+
+    private var selectedImageStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
+                ForEach(Array(selectedImageData.enumerated()), id: \.offset) { _, data in
+                    reviewThumbnail(for: data)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func reviewThumbnail(for data: Data) -> some View {
+        if let image = UIImage(data: data) {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 84, height: 84)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
+    private func postReview() {
+        let comment = commentText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !comment.isEmpty, rating > 0 else { return }
+
+        appData.addReview(
+            locationKey: locationKey,
+            locationName: locationName,
+            displayName: nameText,
+            anonymous: anonymous,
+            rating: rating,
+            comment: comment,
+            imageData: selectedImageData
+        )
+
+        alertMessage = "Review posted."
+        nameText = ""
+        anonymous = false
+        rating = 0
+        commentText = ""
+        selectedImageData = []
+        photoItems = []
+    }
+
+    private func loadPhotos(_ items: [PhotosPickerItem]) async {
+        var data: [Data] = []
+        for item in items {
+            if let itemData = try? await item.loadTransferable(type: Data.self) {
+                data.append(itemData)
+            }
+        }
+        await MainActor.run {
+            selectedImageData = data
+        }
+    }
+
+    private func loadFiles(_ urls: [URL]) async {
+        var data: [Data] = []
+        for url in urls {
+            let access = url.startAccessingSecurityScopedResource()
+            defer {
+                if access { url.stopAccessingSecurityScopedResource() }
+            }
+            if let itemData = try? Data(contentsOf: url) {
+                data.append(itemData)
+            }
+        }
+        await MainActor.run {
+            selectedImageData = data
+        }
+    }
+
+    private func readReviewsIfNeeded() {
+        guard speechManager.isEnabled else { return }
+        let segments = reviews.enumerated().map { index, review in
+            SpeechSegment(
+                id: review.id.uuidString,
+                text: "Review \(index + 1). \(review.displayName). \(review.rating) stars. \(review.comment)"
+            )
+        }
+        speechManager.speak(segments: segments)
+    }
+}
+
+private struct ReviewCard: View {
+    let review: StoredReview
+    let isHighlighted: Bool
+    var likeAction: () -> Void
+
+    private let formatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top) {
+                Text(review.displayName)
+                    .font(.headline)
+                Spacer()
+                Text(formatter.string(from: review.date))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 3) {
+                ForEach(0..<5, id: \.self) { index in
+                    Image(systemName: index < review.rating ? "star.fill" : "star")
+                        .foregroundStyle(.yellow)
+                }
+            }
+
+            Text(review.comment)
+                .font(.body)
+
+            if !review.imageData.isEmpty {
+                reviewImageStrip
+            }
+
+            Button(action: likeAction) {
+                Label("\(review.likes)", systemImage: "hand.thumbsup.fill")
+                    .foregroundStyle(.blue)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding()
+        .background(AnyShapeStyle(.thinMaterial), in: RoundedRectangle(cornerRadius: 16))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(isHighlighted ? Color.yellow.opacity(0.16) : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(isHighlighted ? Color.yellow : Color.clear, lineWidth: 2)
+        )
+    }
+
+    private var reviewImageStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
+                ForEach(Array(review.imageData.enumerated()), id: \.offset) { _, data in
+                    reviewThumbnail(for: data)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func reviewThumbnail(for data: Data) -> some View {
+        if let image = UIImage(data: data) {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 84, height: 84)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+    }
+}
+
+private struct StarRating: View {
+    @Binding var rating: Int
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(1...5, id: \.self) { index in
+                Button {
+                    rating = index
+                } label: {
+                    Image(systemName: index <= rating ? "star.fill" : "star")
+                        .foregroundStyle(.yellow)
+                        .font(.title2)
+                }
+                .buttonStyle(.plain)
+                .speechAnnouncement(index == 1 ? "1 star" : "\(index) stars")
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Rating")
+        .accessibilityValue("\(rating) out of 5")
+    }
+}
+
+#Preview {
+    ReviewsView(
+        locationKey: "Sample",
+        locationName: "Sample Location",
+        textSize: .medium
+    )
+    .environment(AppData())
+}
