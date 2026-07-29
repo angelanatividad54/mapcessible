@@ -1,0 +1,2345 @@
+import SwiftUI
+import MapKit
+import CoreLocation
+import SwiftData
+import Observation
+import UIKit
+
+final class LocationAuthorizationMonitor: NSObject, CLLocationManagerDelegate {
+    var onStatusChange: (CLAuthorizationStatus) -> Void = { _ in }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        onStatusChange(manager.authorizationStatus)
+    }
+
+    func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
+        onStatusChange(status)
+    }
+}
+
+struct ContentView: View {
+    @Environment(AppData.self) private var appData
+    @State private var position: MapCameraPosition = .userLocation(fallback: .automatic)
+    //Centering the camera on user location, where default is in the middle of bridgeport if user location cannot be determined
+    @State private var locationManager = CLLocationManager()
+    @State private var locationAuthorizationMonitor = LocationAuthorizationMonitor()
+    @State private var locationAuthorizationStatus: CLAuthorizationStatus = .notDetermined
+    @State private var locationPermissionAlertMessage: String?
+    //Gives the location permission popup
+    @State private var is3D: Bool = false
+    @Binding var textSize: AppTextSize
+    @Binding var colorFilter: AppColorFilter
+    @Bindable var savedLocationStore: SavedLocationStore
+    //Var for the 3D view. The standard is 2d.
+    @State private var isShowingLocations = false
+    @State private var selectedPointOfInterest: PointOfInterestSheetItem?
+    @State private var selectedAccessibleFeature: AccessibleFeatureSheetItem?
+    @State private var showReviewsPage = false
+    @State private var showImprovementsPage = false
+    @State private var showLookAroundPage = false
+    @State private var activeRouteSegments: [MKRoute] = []
+    @State private var showRouteOnMap = false
+    @State private var accessibilitySelection = RouteAccessibilitySelection()
+    
+    // Search properties
+    @State private var searchText = ""
+    @State private var searchResults: [MKMapItem] = []
+    @State private var selectedLocation: MKMapItem?
+    @State private var route: MKRoute?
+    
+    @State private var selectedFeature: MapFeature?
+    //Accessible coordinates
+    
+    let defaultCoordinate = CLLocationCoordinate2D(latitude: 41.836, longitude: -87.648)
+    
+    var body: some View {
+        NavigationStack {
+            ZStack(alignment: .top) {
+                //The Map View
+                Map(position: $position, selection: $selectedFeature) {
+                    mapContent()
+                }
+                .mapStyle(.standard(elevation: .realistic))
+                .mapFeatureSelectionDisabled { feature in
+                    feature.kind != .pointOfInterest
+                }
+                .mapFeatureSelectionAccessory(nil)
+                .onChange(of: selectedFeature) { _, newFeature in
+                    guard let newFeature, newFeature.kind == .pointOfInterest else { return }
+
+                    Task {
+                        do {
+                            let request = MKMapItemRequest(feature: newFeature)
+                            let mapItem = try await request.mapItem
+                            await MainActor.run {
+                                activeRouteSegments = []
+                                showRouteOnMap = false
+                                selectedPointOfInterest = PointOfInterestSheetItem(
+                                    title: mapItem.name ?? newFeature.title ?? "Location",
+                                    mapItem: mapItem,
+                                    coordinate: mapItem.placemark.coordinate
+                                )
+                            }
+                        } catch {
+                            await MainActor.run {
+                                activeRouteSegments = []
+                                showRouteOnMap = false
+                                selectedPointOfInterest = PointOfInterestSheetItem(
+                                    title: newFeature.title ?? "Location",
+                                    mapItem: nil,
+                                    coordinate: newFeature.coordinate
+                                )
+                            }
+                        }
+                    }
+                }
+                .ignoresSafeArea()
+                
+                .mapControls{
+                    MapScaleView()
+                }
+                
+                .searchable(text: $searchText, prompt: "Search for a destination...")
+                .onSubmit(of: .search) {
+                    performSearch()
+                }
+                // Trigger route calculation whenever the user selects a search result
+                .onChange(of: selectedLocation) { _, newLocation in
+                    if let newLocation {
+                        activeRouteSegments = []
+                        showRouteOnMap = false
+                        selectedPointOfInterest = PointOfInterestSheetItem(
+                            title: newLocation.name ?? "Location",
+                            mapItem: newLocation,
+                            coordinate: newLocation.placemark.coordinate
+                        )
+                    }
+                }
+                
+                // Control stack of settings, location, and 3d button
+                VStack(alignment: .trailing, spacing: 12) {
+                    //Location tracker
+                    Button(action: {
+                        centerOnUser()
+                    }) {
+                        Image(systemName: "location.fill")
+                            .font(textSize.mapButtonIconFont)
+                            .frame(width: textSize.mapButtonSize, height: textSize.mapButtonSize)
+                        
+                    }
+                    .foregroundStyle(.white)
+                    .background(.blue, in: Circle())
+                    .accessibilityLabel("Your Location")
+                    .speechAnnouncement("Your Location")
+                    
+                    //3D toggle
+                    Button(action: {
+                        toggle3D()
+                    }) {
+                        Text(is3D ? "2D" : "3D")
+                            .font(textSize.mapButtonIconFont)
+                            .frame(width: textSize.mapButtonSize, height: textSize.mapButtonSize)
+                        
+                    }
+                    .foregroundStyle(.white)
+                    .background(.blue, in: Circle())
+                    .accessibilityLabel("3D Toggle")
+                    .speechAnnouncement("3D Toggle")
+                    
+                }
+                .padding(.leading, 300) // Distance from the right edge
+                if shouldShowLocationRequestPage {
+                    RequestLocationView(
+                        authorizationStatus: locationAuthorizationStatus,
+                        requestAccess: requestLocationAccess,
+                        openSettings: openSystemSettings
+                    )
+                    .padding()
+                    .transition(.opacity)
+                    .zIndex(1)
+                }
+            }
+            .alert("Location Services", isPresented: Binding(get: { locationPermissionAlertMessage != nil }, set: { if !$0 { locationPermissionAlertMessage = nil } })) {
+                Button("OK", role: .cancel) { locationPermissionAlertMessage = nil }
+            } message: {
+                Text(locationPermissionAlertMessage ?? "")
+            }
+            .onAppear {
+                locationAuthorizationMonitor.onStatusChange = { status in
+                    handleLocationAuthorization(status, locationManager: locationManager)
+                }
+                locationManager.delegate = locationAuthorizationMonitor
+                refreshLocationAuthorization()
+                //pop up for the location permission
+            }
+            .sheet(isPresented: $isShowingLocations) {
+                LocationView(
+                    coordinate: locationManager.location?.coordinate ?? defaultCoordinate,
+                    textSize: textSize,
+                    savedLocationStore: savedLocationStore
+                )
+                    // Sets the sheet to a small 250-point height
+                    .presentationDetents([.height(250)])
+                    // Makes it look like a floating card
+                    .presentationDragIndicator(.visible)
+            }
+            .sheet(item: $selectedPointOfInterest, onDismiss: {
+                selectedFeature = nil
+                selectedLocation = nil
+            }) { item in
+                BlankPointOfInterestSheet(
+                    pointOfInterest: item,
+                    savedLocationStore: savedLocationStore,
+                    routeSegments: $activeRouteSegments,
+                    showRouteOnMap: $showRouteOnMap,
+                    accessibilitySelection: $accessibilitySelection,
+                    textSize: textSize
+                )
+                    .presentationDetents([.height(300)])
+                    .presentationDragIndicator(.visible)
+            }
+            .sheet(item: $selectedAccessibleFeature) { feature in
+                AccessibleFeatureSheet(
+                    feature: feature,
+                    savedLocationStore: savedLocationStore,
+                    textSize: textSize
+                )
+                .presentationDetents([.height(300)])
+                .presentationDragIndicator(.visible)
+            }
+        }
+        .dynamicTypeSize(textSize.dynamicTypeSize)
+        .appColorFilter(colorFilter)
+        //applies the filter and text size
+    }
+    
+    @MapContentBuilder
+    private func mapContent() -> some MapContent {
+        UserAnnotation {
+            Circle()
+                .fill(.blue)
+                .frame(width: 30, height: 30)
+                .onTapGesture {
+                    isShowingLocations.toggle()
+                }
+        }
+
+        ForEach(searchResults, id: \.self) { item in
+            Annotation(item.name ?? "Destination", coordinate: item.placemark.coordinate) {
+                Image(systemName: "mappin.circle.fill")
+                    .font(.title)
+                    .foregroundStyle(.red)
+                    .onTapGesture {
+                        selectedLocation = item
+                }
+            }
+        }
+
+        ForEach(savedLocationStore.locations.filter { $0.kind == .customPin && $0.latitude != nil && $0.longitude != nil }) { location in
+            Annotation(location.name, coordinate: CLLocationCoordinate2D(latitude: location.latitude ?? 0, longitude: location.longitude ?? 0)) {
+                Image(systemName: "mappin.circle.fill")
+                    .font(.title)
+                    .foregroundStyle(.white)
+                    .padding(6)
+                    .background(.teal, in: Circle())
+            }
+        }
+
+        if showRouteOnMap {
+            ForEach(activeRouteSegments.indices, id: \.self) { index in
+                MapPolyline(activeRouteSegments[index].polyline)
+                    .stroke(.blue, lineWidth: 5)
+            }
+        }
+
+        ForEach(benchLocation) { location in
+            Annotation("Bench", coordinate: location.coordinate) {
+                Button {
+                    selectedAccessibleFeature = AccessibleFeatureSheetItem(
+                        name: "Bench",
+                        coordinate: location.coordinate,
+                        status: savedLocationStore.currentStatus(for: "Bench", coordinate: location.coordinate)
+                    )
+                } label: {
+                    Image(systemName: "chair.fill")
+                        .foregroundColor(accessibilitySelection.benches ? .orange : .brown)
+                        .background(Circle().fill(.white).shadow(radius: 5))
+                        .scaleEffect(accessibilitySelection.benches ? 1.25 : 1.0)
+                        .dynamicTypeSize(textSize.dynamicTypeSize)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+
+        ForEach(rampLocation) { location in
+            Annotation("Ramp", coordinate: location.coordinate) {
+                Button {
+                    selectedAccessibleFeature = AccessibleFeatureSheetItem(
+                        name: "Ramp",
+                        coordinate: location.coordinate,
+                        status: savedLocationStore.currentStatus(for: "Ramp", coordinate: location.coordinate)
+                    )
+                } label: {
+                    Image(systemName: "arrow.up.right.circle")
+                        .foregroundColor(.white)
+                        .background(Circle().fill(.green).shadow(radius: 5))
+                        .scaleEffect(accessibilitySelection.ramps ? 1.25 : 1.0)
+                        .dynamicTypeSize(textSize.dynamicTypeSize)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+
+        ForEach(doorLocation) { location in
+            Annotation("Automatic Door", coordinate: location.coordinate) {
+                Button {
+                    selectedAccessibleFeature = AccessibleFeatureSheetItem(
+                        name: "Automatic Door",
+                        coordinate: location.coordinate,
+                        status: savedLocationStore.currentStatus(for: "Automatic Door", coordinate: location.coordinate)
+                    )
+                } label: {
+                    Image(systemName: "square.split.2x1.fill")
+                        .foregroundColor(.yellow)
+                        .background(Circle().fill(.white).shadow(radius: 5))
+                        .scaleEffect(accessibilitySelection.automaticDoors ? 1.25 : 1.0)
+                        .dynamicTypeSize(textSize.dynamicTypeSize)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+
+        ForEach(parkingLocation) { location in
+            Annotation("Accessible Parking", coordinate: location.coordinate) {
+                Button {
+                    selectedAccessibleFeature = AccessibleFeatureSheetItem(
+                        name: "Accessible Parking",
+                        coordinate: location.coordinate,
+                        status: savedLocationStore.currentStatus(for: "Accessible Parking", coordinate: location.coordinate)
+                    )
+                } label: {
+                    Image(systemName: "figure.roll")
+                        .foregroundColor(.white)
+                        .background(Circle().fill(.blue).shadow(radius: 5))
+                        .scaleEffect(accessibilitySelection.parking ? 1.25 : 1.0)
+                        .dynamicTypeSize(textSize.dynamicTypeSize)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+
+        ForEach(elevatorLocation) { location in
+            Annotation("Elevator", coordinate: location.coordinate) {
+                Button {
+                    selectedAccessibleFeature = AccessibleFeatureSheetItem(
+                        name: "Elevator",
+                        coordinate: location.coordinate,
+                        status: savedLocationStore.currentStatus(for: "Elevator", coordinate: location.coordinate)
+                    )
+                } label: {
+                    Image(systemName: "arrow.up.arrow.down.square.fill")
+                        .foregroundColor(.white)
+                        .background(Circle().fill(.purple).shadow(radius: 5))
+                        .scaleEffect(accessibilitySelection.elevators ? 1.25 : 1.0)
+                        .dynamicTypeSize(textSize.dynamicTypeSize)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+
+        ForEach(crosswalkLocation) { location in
+            Annotation("Accessible Crosswalk", coordinate: location.coordinate) {
+                Button {
+                    selectedAccessibleFeature = AccessibleFeatureSheetItem(
+                        name: "Accessible Crosswalk",
+                        coordinate: location.coordinate,
+                        status: savedLocationStore.currentStatus(for: "Accessible Crosswalk", coordinate: location.coordinate)
+                    )
+                } label: {
+                    Image(systemName: "figure.walk")
+                        .foregroundColor(.white)
+                        .background(Circle().fill(.pink).shadow(radius: 5))
+                        .scaleEffect(accessibilitySelection.accessibleCrosswalks ? 1.25 : 1.0)
+                        .dynamicTypeSize(textSize.dynamicTypeSize)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+    
+    // Logic to toggle between 2D and 3D camera states
+    private func toggle3D() {
+        withAnimation(.easeInOut(duration: 0.5)) {
+            is3D.toggle()
+            
+            let center = locationManager.location?.coordinate ?? position.camera?.centerCoordinate ?? defaultCoordinate
+            let distance = position.camera?.distance ?? 1300
+            let targetPitch: Double = is3D ? 60 : 0
+            
+            position = .camera(
+                MapCamera(centerCoordinate: center, distance: distance, heading: 0, pitch: targetPitch)
+            )
+        }
+    }
+    
+    // Logic to center map back on user
+    private func centerOnUser() {
+        requestLocationAccess()
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+            position = .userLocation(fallback: .region(MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: 41.836, longitude: -87.648), span: MKCoordinateSpan(latitudeDelta: 0.02, longitudeDelta: 0.02))))
+        }
+    }
+    
+    private func refreshLocationAuthorization() {
+        handleLocationAuthorization(locationManager.authorizationStatus, locationManager: locationManager)
+    }
+
+    private func handleLocationAuthorization(_ status: CLAuthorizationStatus, locationManager: CLLocationManager) {
+        locationAuthorizationStatus = status
+        switch status {
+        case .notDetermined:
+            locationPermissionAlertMessage = nil
+        case .denied, .restricted:
+            locationPermissionAlertMessage = "Location services not allowed for this app. Please change this in the settings app to use Mapscessible."
+        case .authorizedAlways, .authorizedWhenInUse:
+            locationPermissionAlertMessage = nil
+        @unknown default:
+            locationPermissionAlertMessage = "Location services not allowed for this app. Please change this in the settings app to use Mapscessible."
+        }
+    }
+
+    private var shouldShowLocationRequestPage: Bool {
+        switch locationAuthorizationStatus {
+        case .authorizedAlways, .authorizedWhenInUse:
+            return false
+        case .notDetermined, .denied, .restricted:
+            return true
+        @unknown default:
+            return true
+        }
+    }
+
+    private func requestLocationAccess() {
+        switch locationAuthorizationStatus {
+        case .notDetermined:
+            locationManager.requestWhenInUseAuthorization()
+        case .denied, .restricted:
+            locationPermissionAlertMessage = "Location services not allowed for this app. Please change this in the settings app to use Mapscessible."
+        case .authorizedAlways, .authorizedWhenInUse:
+            locationPermissionAlertMessage = nil
+        @unknown default:
+            locationPermissionAlertMessage = "Location services not allowed for this app. Please change this in the settings app to use Mapscessible."
+        }
+    }
+
+    private func openSystemSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
+    }
+    
+    // MARK: - 1. Search Logic
+    private func performSearch() {
+        guard !searchText.isEmpty else { return }
+        
+        let request = MKLocalSearch.Request()
+        request.naturalLanguageQuery = searchText
+        // Prioritize search results near the current visible map area
+        if let region = locationManager.location.map({ MKCoordinateRegion(center: $0.coordinate, span: MKCoordinateSpan(latitudeDelta: 0.3, longitudeDelta: 0.3)) }) {
+            request.region = region
+        }
+        
+        let search = MKLocalSearch(request: request)
+        search.start { response, error in
+            guard let response, error == nil else {
+                print("Search error: \(error?.localizedDescription ?? "Unknown error")")
+                return
+            }
+            
+            let centerCoordinate = self.locationManager.location?.coordinate ?? self.defaultCoordinate
+            let centerLocation = CLLocation(latitude: centerCoordinate.latitude, longitude: centerCoordinate.longitude)
+            let nearbyResults = response.mapItems.filter { item in
+                let itemLocation = CLLocation(latitude: item.placemark.coordinate.latitude, longitude: item.placemark.coordinate.longitude)
+                return centerLocation.distance(from: itemLocation) <= 1609.34
+            }
+
+            // Update results and clear old routes
+            self.searchResults = nearbyResults.isEmpty ? response.mapItems : nearbyResults
+            self.route = nil
+            
+            // Center the map around the first search result
+            if let firstItem = self.searchResults.first ?? response.mapItems.first {
+                self.position = .region(MKCoordinateRegion(
+                    center: firstItem.placemark.coordinate,
+                    span: MKCoordinateSpan(latitudeDelta: 0.035, longitudeDelta: 0.035)
+                ))
+            }
+        }
+    }
+    
+    // MARK: - 2. Directions Logic
+    private func fetchDirections(to destination: MKMapItem) {
+        let request = MKDirections.Request()
+        
+        // Define Point X (Starting position). Defaults to user location.
+        // Replace 'MKMapItem.forCurrentLocation()' with any custom MKMapItem to set a different Point X.
+        request.source = MKMapItem.forCurrentLocation()
+        request.destination = destination
+        request.transportType = .automobile
+        
+        let directions = MKDirections(request: request)
+        directions.calculate { response, error in
+            guard let response, let route = response.routes.first, error == nil else {
+                print("Directions error: \(error?.localizedDescription ?? "Unknown error")")
+                return
+            }
+            
+            // Save the calculated route to update the UI
+            self.route = route
+            
+            // Dynamic Zoom: Adjust map camera bounds to fit both start and end locations
+            let routeRect = route.polyline.boundingMapRect
+            self.position = MapCameraPosition.rect(routeRect)
+        }
+    }
+}
+
+struct LocationView: View {
+    let coordinate: CLLocationCoordinate2D
+    let textSize: AppTextSize
+    @Bindable var savedLocationStore: SavedLocationStore
+
+    @State private var showPinNameSheet = false
+    @State private var showFeatureTypeSheet = false
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Button {
+                showPinNameSheet = true
+            } label: {
+                Text("Pin and Save Location")
+                    .font(.headline)
+                    .dynamicTypeSize(textSize.dynamicTypeSize)
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, minHeight: textSize.mapButtonSize)
+                    .background(.blue, in: RoundedRectangle(cornerRadius: 14))
+            }
+            .speechAnnouncement("Pin and Save Location")
+
+            Button {
+                showFeatureTypeSheet = true
+            } label: {
+                Text("Mark New Accessibility Feature")
+                    .font(.headline)
+                    .dynamicTypeSize(textSize.dynamicTypeSize)
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, minHeight: textSize.mapButtonSize)
+                    .background(.blue, in: RoundedRectangle(cornerRadius: 14))
+            }
+            .speechAnnouncement("Mark New Accessibility Feature")
+        }
+        .padding()
+        .sheet(isPresented: $showPinNameSheet) {
+            PinNameSheet(
+                coordinate: coordinate,
+                textSize: textSize
+            ) { pinName in
+                savedLocationStore.saveCustomPin(
+                    name: pinName,
+                    approximateAddress: "Near your location",
+                    coordinate: coordinate
+                )
+            }
+            .presentationDetents([.height(220)])
+            .presentationDragIndicator(.visible)
+        }
+        .sheet(isPresented: $showFeatureTypeSheet) {
+            FeatureTypeSelectionSheet(textSize: textSize) { featureType in
+                saveAccessibleFeatureCoordinate(coordinate, featureType: featureType)
+            }
+            .presentationDetents([.height(280)])
+            .presentationDragIndicator(.visible)
+        }
+    }
+
+    private func saveAccessibleFeatureCoordinate(_ coordinate: CLLocationCoordinate2D, featureType: AccessibleFeatureType) {
+        switch featureType {
+        case .ramp:
+            rampLocation.append(ramp(latitude: coordinate.latitude, longitude: coordinate.longitude))
+        case .bench:
+            benchLocation.append(bench(latitude: coordinate.latitude, longitude: coordinate.longitude))
+        case .automaticDoor:
+            doorLocation.append(door(latitude: coordinate.latitude, longitude: coordinate.longitude))
+        case .accessibleCrosswalk:
+            crosswalkLocation.append(crosswalk(latitude: coordinate.latitude, longitude: coordinate.longitude))
+        case .accessibleParking:
+            parkingLocation.append(parking(latitude: coordinate.latitude, longitude: coordinate.longitude))
+        case .elevator:
+            elevatorLocation.append(elevator(latitude: coordinate.latitude, longitude: coordinate.longitude))
+        }
+    }
+}
+
+struct PointOfInterestSheetItem: Identifiable {
+    let id = UUID()
+    let title: String
+    let mapItem: MKMapItem?
+    let coordinate: CLLocationCoordinate2D
+
+    var locationKey: String {
+        "\(title)|\(coordinate.latitude)|\(coordinate.longitude)"
+    }
+}
+
+struct LookAroundPreviewCard: View {
+    let coordinate: CLLocationCoordinate2D
+    var onOpenFullScreen: () -> Void = {}
+    @State private var scene: MKLookAroundScene?
+
+    var body: some View {
+        Group {
+            if scene != nil {
+                LookAroundPreview(scene: $scene, allowsNavigation: true, showsRoadLabels: true)
+                    .frame(height: 110)
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                    .onTapGesture {
+                        onOpenFullScreen()
+                    }
+            } else {
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(.secondary.opacity(0.12))
+                    .frame(height: 110)
+                    .overlay(
+                        VStack(spacing: 6) {
+                            Image(systemName: "binoculars")
+                            Text("Look Around")
+                        }
+                        .foregroundStyle(.secondary)
+                    )
+                    .onTapGesture {
+                        onOpenFullScreen()
+                    }
+            }
+        }
+        .task {
+            do {
+                let request = MKLookAroundSceneRequest(coordinate: coordinate)
+                scene = try await request.scene
+            } catch {
+                scene = nil
+            }
+        }
+    }
+}
+
+struct LookAroundFullScreenView: View {
+    @Environment(\.dismiss) private var dismiss
+    let coordinate: CLLocationCoordinate2D
+    @State private var scene: MKLookAroundScene?
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            if scene != nil {
+                LookAroundPreview(scene: $scene, allowsNavigation: true, showsRoadLabels: true)
+                    .ignoresSafeArea()
+            } else {
+                Color.black.opacity(0.92)
+                    .ignoresSafeArea()
+                    .overlay {
+                        ProgressView()
+                            .tint(.white)
+                    }
+            }
+
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 30, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding()
+            }
+        }
+        .task {
+            do {
+                let request = MKLookAroundSceneRequest(coordinate: coordinate)
+                scene = try await request.scene
+            } catch {
+                scene = nil
+            }
+        }
+    }
+}
+
+enum RouteTransportMode: String, CaseIterable, Identifiable {
+    case car
+    case transit
+    case bike
+    case walk
+
+    var id: Self { self }
+
+    var symbolName: String {
+        switch self {
+        case .car:
+            "car.fill"
+        case .transit:
+            "tram.fill"
+        case .bike:
+            "bicycle"
+        case .walk:
+            "figure.walk"
+        }
+    }
+
+    var transportType: MKDirectionsTransportType {
+        switch self {
+        case .car:
+            .automobile
+        case .transit:
+            .transit
+        case .bike:
+            .cycling
+        case .walk:
+            .walking
+        }
+    }
+}
+
+struct RouteItineraryItem: Identifiable, Hashable {
+    enum Kind: Hashable {
+        case stop
+        case destination
+        case accessibility
+    }
+
+    let id = UUID()
+    var title: String
+    var mapItem: MKMapItem
+    var kind: Kind
+}
+
+struct RouteAccessibilitySelection: Equatable {
+    var ramps = false
+    var automaticDoors = false
+    var parking = false
+    var elevators = false
+    var accessibleCrosswalks = false
+    var benches = false
+    var benchEveryMiles: Double? = nil
+}
+
+enum AccessibleFeatureType: String, CaseIterable, Identifiable {
+    case ramp = "Ramp"
+    case bench = "Bench"
+    case automaticDoor = "Automatic Door"
+    case accessibleCrosswalk = "Accessible Crosswalk"
+    case accessibleParking = "Accessible Parking"
+    case elevator = "Elevator"
+
+    var id: String { rawValue }
+}
+
+struct AccessibleFeatureSheetItem: Identifiable {
+    let id = UUID()
+    var name: String
+    var coordinate: CLLocationCoordinate2D
+    var status: String
+
+    var approximateAddress: String {
+        "Near \(name)"
+    }
+
+    var statusKey: String {
+        "\(name)|\(coordinate.latitude)|\(coordinate.longitude)"
+    }
+}
+
+struct PinNameSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let coordinate: CLLocationCoordinate2D
+    let textSize: AppTextSize
+    var onCancel: (() -> Void)? = nil
+    var onDone: (String) -> Void
+    @State private var pinName = ""
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Name this pin:")
+                    .font(.headline)
+
+                TextField("Pin name", text: $pinName)
+                    .textFieldStyle(.roundedBorder)
+
+                Spacer()
+
+                HStack {
+                    Button("Cancel") {
+                        onCancel?()
+                        dismiss()
+                    }
+                    .foregroundStyle(.red)
+
+                    Spacer()
+
+                    Button("Done") {
+                        let trimmed = pinName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        onDone(trimmed.isEmpty ? "Saved Pin" : trimmed)
+                        dismiss()
+                    }
+                    .foregroundStyle(.blue)
+                }
+            }
+            .padding()
+            .dynamicTypeSize(textSize.dynamicTypeSize)
+            .navigationTitle("Save Pin")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+}
+
+struct FeatureTypeSelectionSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let textSize: AppTextSize
+    var onCancel: (() -> Void)? = nil
+    var onDone: (AccessibleFeatureType) -> Void
+    @State private var selectedType: AccessibleFeatureType = .ramp
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("What accessibility feature is this location?")
+                    .font(.headline)
+
+                ScrollView {
+                    VStack(spacing: 10) {
+                        ForEach(AccessibleFeatureType.allCases) { type in
+                            Button {
+                                selectedType = type
+                            } label: {
+                                HStack {
+                                    Image(systemName: selectedType == type ? "circle.inset.filled" : "circle")
+                                    Text(type.rawValue)
+                                    Spacer()
+                                }
+                                .padding()
+                                .background(.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+
+                HStack {
+                    Button("Cancel") {
+                        onCancel?()
+                        dismiss()
+                    }
+                    .foregroundStyle(.red)
+
+                    Spacer()
+
+                    Button("Done") {
+                        onDone(selectedType)
+                        dismiss()
+                    }
+                    .foregroundStyle(.blue)
+                }
+            }
+            .padding()
+            .dynamicTypeSize(textSize.dynamicTypeSize)
+        }
+    }
+}
+
+struct AccessibleFeatureSheet: View {
+    @Environment(AppData.self) private var appData
+    let feature: AccessibleFeatureSheetItem
+    let savedLocationStore: SavedLocationStore
+    let textSize: AppTextSize
+    @State private var currentStatus: String
+    @State private var showChangeNotificationSheet = false
+    @State private var showStatusSheet = false
+    @State private var showSaveAlert = false
+    @State private var showChangeSubmittedAlert = false
+    @State private var showReviewsPage = false
+
+    init(feature: AccessibleFeatureSheetItem, savedLocationStore: SavedLocationStore, textSize: AppTextSize) {
+        self.feature = feature
+        self.savedLocationStore = savedLocationStore
+        self.textSize = textSize
+        _currentStatus = State(initialValue: savedLocationStore.currentStatus(for: feature.name, coordinate: feature.coordinate))
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 12) {
+                Text(feature.name)
+                    .font(.title3)
+                    .fontWeight(.semibold)
+
+                Button {
+                    saveAccessibleFeature()
+                } label: {
+                    Text("Save accessible feature")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, minHeight: 48)
+                        .background(.blue, in: RoundedRectangle(cornerRadius: 14))
+                }
+                .buttonStyle(.plain)
+                .alert("Location saved.", isPresented: $showSaveAlert) {
+                    Button("OK", role: .cancel) { }
+                }
+
+                Button {
+                    showChangeNotificationSheet = true
+                } label: {
+                    Text("Submit notification of change")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, minHeight: 48)
+                        .background(.blue, in: RoundedRectangle(cornerRadius: 14))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    showReviewsPage = true
+                } label: {
+                    Text("Reviews")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, minHeight: 48)
+                        .background(.blue, in: RoundedRectangle(cornerRadius: 14))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    showStatusSheet = true
+                } label: {
+                    Text("Status")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, minHeight: 48)
+                        .background(.blue, in: RoundedRectangle(cornerRadius: 14))
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+            }
+            .padding()
+            .dynamicTypeSize(textSize.dynamicTypeSize)
+            .sheet(isPresented: $showChangeNotificationSheet) {
+                AccessibleFeatureChangeSheet(
+                    currentStatus: currentStatus,
+                    textSize: textSize
+                ) { newStatus in
+                    currentStatus = newStatus
+                    savedLocationStore.updateAccessibleFeatureStatus(
+                        name: feature.name,
+                        coordinate: feature.coordinate,
+                        status: newStatus
+                    )
+                    showChangeSubmittedAlert = true
+                } onCancel: {
+                    showChangeNotificationSheet = false
+                }
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+            }
+            .sheet(isPresented: $showStatusSheet) {
+                AccessibleFeatureStatusSheet(status: currentStatus, textSize: textSize)
+                    .presentationDetents([.height(180)])
+                    .presentationDragIndicator(.visible)
+            }
+            .fullScreenCover(isPresented: $showReviewsPage) {
+                ReviewsView(
+                    locationKey: feature.statusKey,
+                    locationName: feature.name,
+                    textSize: textSize
+                )
+                .environment(appData)
+            }
+            .alert("Notification of change submitted.", isPresented: $showChangeSubmittedAlert) {
+                Button("OK", role: .cancel) { }
+            }
+            .onAppear {
+                currentStatus = savedLocationStore.currentStatus(for: feature.name, coordinate: feature.coordinate)
+            }
+        }
+    }
+
+    private func saveAccessibleFeature() {
+        savedLocationStore.saveAccessibleFeature(
+            name: feature.name,
+            approximateAddress: feature.approximateAddress,
+            coordinate: feature.coordinate,
+            status: currentStatus
+        )
+        showSaveAlert = true
+        showSaveAlert = true
+    }
+}
+
+struct AccessibleFeatureStatusSheet: View {
+    let status: String
+    let textSize: AppTextSize
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 16) {
+                Text("Current Status")
+                    .font(.headline)
+                Text(status)
+                    .font(.title3)
+                    .multilineTextAlignment(.center)
+                Spacer()
+            }
+            .padding()
+            .dynamicTypeSize(textSize.dynamicTypeSize)
+        }
+    }
+}
+
+struct AccessibleFeatureChangeSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let currentStatus: String
+    let textSize: AppTextSize
+    var onDone: (String) -> Void
+    var onCancel: () -> Void
+    @State private var selectedStatus: String
+
+    init(currentStatus: String, textSize: AppTextSize, onDone: @escaping (String) -> Void, onCancel: @escaping () -> Void) {
+        self.currentStatus = currentStatus
+        self.textSize = textSize
+        self.onDone = onDone
+        self.onCancel = onCancel
+        _selectedStatus = State(initialValue: currentStatus)
+    }
+
+    private let options = [
+        "Not Working",
+        "Under Construction",
+        "Closed",
+        "Removed",
+        "Working Properly."
+    ]
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Please describe the change:")
+                    .font(.title3)
+                    .fontWeight(.semibold)
+
+                ScrollView {
+                    VStack(spacing: 12) {
+                        ForEach(options, id: \.self) { option in
+                            Button {
+                                selectedStatus = option
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: selectedStatus == option ? "checkmark.circle.fill" : "circle")
+                                    Text(option)
+                                    Spacer()
+                                }
+                                .padding()
+                                .background(.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+
+                Divider()
+
+                HStack {
+                    Button("Cancel") {
+                        onCancel()
+                        dismiss()
+                    }
+                    .foregroundStyle(.red)
+
+                    Spacer()
+
+                    Button("Done") {
+                        onDone(selectedStatus)
+                        dismiss()
+                    }
+                    .foregroundStyle(.blue)
+                }
+            }
+            .padding()
+            .dynamicTypeSize(textSize.dynamicTypeSize)
+        }
+    }
+}
+
+struct BlankPointOfInterestSheet: View {
+    @Environment(AppData.self) private var appData
+    let pointOfInterest: PointOfInterestSheetItem
+    @Bindable var savedLocationStore: SavedLocationStore
+    @Binding var routeSegments: [MKRoute]
+    @Binding var showRouteOnMap: Bool
+    @Binding var accessibilitySelection: RouteAccessibilitySelection
+    let textSize: AppTextSize
+    @State private var showTransportationDetails = false
+    @State private var showSavedAlert = false
+    @State private var isBookmarked = false
+    @State private var showReviewsPage = false
+    @State private var showImprovementsPage = false
+    @State private var showLookAroundPage = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(pointOfInterest.title)
+                    .font(.title2)
+                    .fontWeight(.semibold)
+                    .dynamicTypeSize(textSize.dynamicTypeSize)
+
+                Spacer()
+
+                Button {
+                    toggleBookmark()
+                } label: {
+                    Image(systemName: isBookmarked ? "bookmark.fill" : "bookmark")
+                        //.font(.headline)
+                        .font(textSize.mapButtonIconFont)
+                        .accessibilityLabel("Save Location")
+                }
+            }
+
+            LookAroundPreviewCard(coordinate: pointOfInterest.coordinate) {
+                showLookAroundPage = true
+            }
+
+            HStack(spacing: 12) {
+                Button(action: { showTransportationDetails = true }) {
+                    VStack(spacing: 6) {
+                        Image(systemName: "car.fill")
+                            .font(textSize.mapButtonIconFont)
+                        Text("Transit")
+                            .font(.headline)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 80)
+                    .dynamicTypeSize(textSize.dynamicTypeSize)
+                }
+                .buttonStyle(.plain)
+                .speechAnnouncement("Transit")
+                .background(.blue, in: RoundedRectangle(cornerRadius: 14))
+                .foregroundStyle(.white)
+
+                Button(action: { showReviewsPage = true }) {
+                    VStack(spacing: 6) {
+                        Image(systemName: "star.fill")
+                            .font(textSize.mapButtonIconFont)
+                        Text("Reviews")
+                            .font(.headline)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 80)
+                    .dynamicTypeSize(textSize.dynamicTypeSize)
+                }
+                .buttonStyle(.plain)
+                .speechAnnouncement("Reviews")
+                .background(.blue, in: RoundedRectangle(cornerRadius: 14))
+                .foregroundStyle(.white)
+
+                Button(action: { showImprovementsPage = true }) {
+                    VStack(spacing: 6) {
+                        Image(systemName: "plus.bubble.fill")
+                            .font(textSize.mapButtonIconFont)
+                        Text("Improvements")
+                            .font(.headline)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 80)
+                    .dynamicTypeSize(textSize.dynamicTypeSize)
+                }
+                .buttonStyle(.plain)
+                .speechAnnouncement("Improvements")
+                .background(.blue, in: RoundedRectangle(cornerRadius: 14))
+                .foregroundStyle(.white)
+            }
+        }
+        .padding(.horizontal)
+        .padding(.top, 8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(.systemBackground))
+        .sheet(isPresented: $showTransportationDetails) {
+            TransportationDetailsSheet(
+                pointOfInterest: pointOfInterest,
+                routeSegments: $routeSegments,
+                showRouteOnMap: $showRouteOnMap,
+                accessibilitySelection: $accessibilitySelection,
+                textSize: textSize
+            )
+                .presentationDetents([.height(450)])
+                .presentationDragIndicator(.visible)
+        }
+        .fullScreenCover(isPresented: $showReviewsPage) {
+            ReviewsView(
+                locationKey: pointOfInterest.locationKey,
+                locationName: pointOfInterest.title,
+                textSize: textSize
+            )
+            .environment(appData)
+        }
+        .fullScreenCover(isPresented: $showImprovementsPage) {
+            ImproveView(
+                locationKey: pointOfInterest.locationKey,
+                locationName: pointOfInterest.title,
+                textSize: textSize
+            )
+            .environment(appData)
+        }
+        .fullScreenCover(isPresented: $showLookAroundPage) {
+            LookAroundFullScreenView(coordinate: pointOfInterest.coordinate)
+        }
+        .alert("Location saved.", isPresented: $showSavedAlert) {
+            Button("OK", role: .cancel) { }
+        }
+        .onAppear {
+            isBookmarked = savedLocationStore.locations.contains(where: {
+                $0.name == pointOfInterest.title
+            })
+        }
+    }
+
+    private func toggleBookmark() {
+        let location = Location(
+            name: pointOfInterest.title,
+            address: pointOfInterest.mapItem?.placemark.title ?? "",
+            reviews: [],
+            reviewLocationKey: pointOfInterest.locationKey
+        )
+
+        if isBookmarked {
+            isBookmarked = false
+            savedLocationStore.locations.removeAll { $0.name == location.name && $0.address == location.address }
+        } else {
+            savedLocationStore.save(location: location)
+            isBookmarked = true
+            showSavedAlert = true
+        }
+    }
+}
+
+struct TransportationDetailsSheet: View {
+    let pointOfInterest: PointOfInterestSheetItem
+    @Binding var routeSegments: [MKRoute]
+    @Binding var showRouteOnMap: Bool
+    @Binding var accessibilitySelection: RouteAccessibilitySelection
+    let textSize: AppTextSize
+
+    @State private var mode: RouteTransportMode = .car
+    @State private var itinerary: [RouteItineraryItem] = []
+    @State private var estimatedMinutes: Double = 0
+    @State private var routeInstructions: [String] = []
+    @State private var showDirectionsSheet = false
+    @State private var showAddStopSheet = false
+    @State private var showAccessibilitySheet = false
+    @State private var showBenchPrompt = false
+    @State private var stopCount: Int = 0
+
+    private var destinationItem: RouteItineraryItem {
+        RouteItineraryItem(
+            title: pointOfInterest.title,
+            mapItem: pointOfInterest.mapItem ?? MKMapItem(placemark: MKPlacemark(coordinate: pointOfInterest.coordinate)),
+            kind: .destination
+        )
+    }
+
+    private var presentationHeight: CGFloat {
+        450 + CGFloat(stopCount * 20)
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 16) {
+                RoundedRectangle(cornerRadius: 24)
+                    .fill(.white)
+                    .overlay(
+                        VStack(spacing: 0) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 10) {
+                                    Text("Your Location")
+                                        .font(.body)
+
+                                    Divider()
+
+                                    ForEach(Array(itinerary.enumerated()), id: \.element.id) { index, item in
+                                        if item.kind == .destination {
+                                            locationRow(title: item.title, isDestination: true)
+                                        } else {
+                                            locationRow(title: item.title)
+                                        }
+                                        if index < itinerary.count - 1 {
+                                            Divider()
+                                        }
+                                    }
+                                }
+
+                                Spacer()
+
+                                Button {
+                                    showAddStopSheet = true
+                                } label: {
+                                    Image(systemName: "plus")
+                                        .font(.headline)
+                                        .foregroundStyle(.white)
+                                        .frame(width: 36, height: 36)
+                                        .background(.gray, in: Circle())
+                                }
+                                .accessibilityLabel("Add stop")
+                            }
+                            .padding()
+                        }
+                    )
+                    .frame(height: max(160, CGFloat((itinerary.count + 1) * 32)))
+
+                HStack(spacing: 10) {
+                    ForEach(RouteTransportMode.allCases) { option in
+                        Button {
+                            mode = option
+                            Task { await rebuildRoute() }
+                        } label: {
+                            Image(systemName: option.symbolName)
+                                .foregroundStyle(.white)
+                                .frame(width: 44, height: 36)
+                                .background(mode == option ? Color.gray.opacity(0.8) : Color.gray, in: RoundedRectangle(cornerRadius: 10))
+                        }
+                    }
+
+                    Button {
+                        showAccessibilitySheet = true
+                    } label: {
+                        Image(systemName: "ellipsis.vertical")
+                            .foregroundStyle(.white)
+                            .frame(width: 44, height: 36)
+                            .background(.gray, in: RoundedRectangle(cornerRadius: 10))
+                    }
+                    .accessibilityLabel("Accessibility options")
+                }
+
+                Button {
+                    showDirectionsSheet = true
+                } label: {
+                    VStack(spacing: 6) {
+                        Text("Estimated Time:")
+                            .font(.caption)
+                            .foregroundStyle(.white)
+                        Text(estimatedTimeText)
+                            .font(.headline)
+                            .foregroundStyle(.white)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(.blue, in: RoundedRectangle(cornerRadius: 14))
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+            }
+            .dynamicTypeSize(textSize.dynamicTypeSize)
+            .padding()
+            .navigationTitle(pointOfInterest.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .onAppear {
+                showRouteOnMap = false
+                if itinerary.isEmpty {
+                    itinerary = [destinationItem]
+                    stopCount = 0
+                }
+                Task { await rebuildRoute() }
+            }
+            .onChange(of: itinerary) { _, newValue in
+                stopCount = max(0, newValue.filter { $0.kind == .stop }.count)
+                Task { await rebuildRoute() }
+            }
+            .onChange(of: mode) { _, _ in
+                Task { await rebuildRoute() }
+            }
+            .onChange(of: accessibilitySelection) { _, _ in
+                Task { await rebuildRoute() }
+            }
+            .sheet(isPresented: $showAddStopSheet) {
+                AddStopSheet(
+                    destinationTitle: pointOfInterest.title,
+                    destinationCoordinate: pointOfInterest.coordinate
+                ) { item in
+                    let stop = RouteItineraryItem(
+                        title: item.name ?? "Stop",
+                        mapItem: item,
+                        kind: .stop
+                    )
+                    if itinerary.isEmpty {
+                        itinerary = [stop, destinationItem]
+                    } else if let destinationIndex = itinerary.firstIndex(where: { $0.kind == .destination }) {
+                        itinerary.insert(stop, at: destinationIndex)
+                    } else {
+                        itinerary.append(stop)
+                    }
+                }
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+            }
+            .fullScreenCover(isPresented: $showAccessibilitySheet) {
+                AccessibilityLocationsSheet(
+                    selection: $accessibilitySelection,
+                    benchAction: {
+                        showBenchPrompt = true
+                    }
+                )
+            }
+            .sheet(isPresented: $showBenchPrompt) {
+                BenchFrequencySheet(
+                    selection: $accessibilitySelection,
+                    onCancel: {
+                        accessibilitySelection.benches = false
+                        accessibilitySelection.benchEveryMiles = nil
+                    }
+                )
+                .presentationDetents([.height(240)])
+                .presentationDragIndicator(.visible)
+            }
+            .sheet(isPresented: $showDirectionsSheet) {
+                DirectionsSheet(
+                    directions: routeInstructions,
+                    endRoute: {
+                        showDirectionsSheet = false
+                        showRouteOnMap = false
+                        routeSegments = []
+                    }
+                )
+                .presentationDetents([.height(200), .large])
+                .presentationDragIndicator(.visible)
+            }
+            .presentationDetents([.height(presentationHeight)])
+        }
+    }
+
+    @ViewBuilder
+    private func locationRow(title: String, isDestination: Bool = false) -> some View {
+        HStack {
+            Image(systemName: "line.3.horizontal")
+                .foregroundStyle(.secondary)
+            Text(title)
+                .font(.body)
+            Spacer()
+        }
+        .padding(.vertical, 6)
+    }
+
+    private var estimatedTimeText: String {
+        guard estimatedMinutes > 0 else {
+            return "Undetermined."
+        }
+
+        if estimatedMinutes < 60 {
+            return "\(max(1, Int(estimatedMinutes.rounded()))) min"
+        }
+
+        let hours = estimatedMinutes / 60
+        if hours < 10 {
+            return String(format: "%.1f hr", hours)
+        }
+
+        return "\(Int(hours.rounded())) hr"
+    }
+
+    private func rebuildRoute() async {
+        let items = navigationWaypoints()
+
+        guard !items.isEmpty else {
+            await MainActor.run {
+                estimatedMinutes = 0
+                routeInstructions = ["No directions available."]
+                routeSegments = []
+                showRouteOnMap = false
+            }
+            return
+        }
+
+        let directRoute = await route(
+            from: MKMapItem.forCurrentLocation(),
+            to: destinationItem.mapItem,
+            transportType: mode.transportType
+        )
+
+        var totalTravelTime: TimeInterval = 0
+        var allInstructions: [String] = []
+        var segments: [MKRoute] = []
+        var source = MKMapItem.forCurrentLocation()
+
+        for item in items {
+            guard let route = await route(from: source, to: item.mapItem, transportType: mode.transportType) else {
+                await MainActor.run {
+                    estimatedMinutes = 0
+                    routeInstructions = ["No route found."]
+                    routeSegments = []
+                    showRouteOnMap = false
+                }
+                return
+            }
+
+            totalTravelTime += route.expectedTravelTime
+            allInstructions.append(contentsOf: route.steps.compactMap { step in
+                step.instructions.isEmpty ? nil : step.instructions
+            })
+            segments.append(route)
+            source = item.mapItem
+        }
+
+        await MainActor.run {
+            if let directRoute {
+                estimatedMinutes = directRoute.expectedTravelTime / 60
+            } else {
+                estimatedMinutes = totalTravelTime / 60
+            }
+            routeInstructions = allInstructions.isEmpty ? ["No route found."] : allInstructions
+            routeSegments = segments
+            showRouteOnMap = !segments.isEmpty
+        }
+    }
+
+    private func navigationWaypoints() -> [RouteItineraryItem] {
+        var items = itinerary
+
+        if !items.contains(where: { $0.kind == .destination }) {
+            items.append(destinationItem)
+        }
+
+        let accessibilityItems = accessibilityRouteItems().filter { shouldIncludeAccessibleFeature($0) }
+        if let destinationIndex = items.firstIndex(where: { $0.kind == .destination }) {
+            items.insert(contentsOf: accessibilityItems, at: destinationIndex)
+        }
+
+        return items
+    }
+
+    private func shouldIncludeAccessibleFeature(_ item: RouteItineraryItem) -> Bool {
+        let referenceCoordinates = itinerary.compactMap { waypoint -> CLLocationCoordinate2D? in
+            switch waypoint.kind {
+            case .stop, .destination:
+                return waypoint.mapItem.placemark.coordinate
+            case .accessibility:
+                return nil
+            }
+        }
+
+        guard !referenceCoordinates.isEmpty else { return false }
+
+        let featureCoordinate = item.mapItem.placemark.coordinate
+        return referenceCoordinates.contains { coordinate in
+            let featureLocation = CLLocation(latitude: featureCoordinate.latitude, longitude: featureCoordinate.longitude)
+            let referenceLocation = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+            return featureLocation.distance(from: referenceLocation) <= 1609.34
+        }
+    }
+
+    private func accessibilityRouteItems() -> [RouteItineraryItem] {
+        var items: [RouteItineraryItem] = []
+
+        if accessibilitySelection.ramps {
+            items.append(contentsOf: routeItems(from: rampLocation, title: "Ramp"))
+        }
+        if accessibilitySelection.automaticDoors {
+            items.append(contentsOf: routeItems(from: doorLocation, title: "Automatic Door"))
+        }
+        if accessibilitySelection.parking {
+            items.append(contentsOf: routeItems(from: parkingLocation, title: "Accessible Parking"))
+        }
+        if accessibilitySelection.elevators {
+            items.append(contentsOf: routeItems(from: elevatorLocation, title: "Elevator"))
+        }
+        if accessibilitySelection.accessibleCrosswalks {
+            items.append(contentsOf: routeItems(from: crosswalkLocation, title: "Accessible Crosswalk"))
+        }
+        if accessibilitySelection.benches && (mode == .walk || mode == .bike) {
+            let strideCount = max(1, Int((accessibilitySelection.benchEveryMiles ?? 1).rounded()))
+            let selectedBenches: [RouteItineraryItem] = benchLocation.enumerated().compactMap { (index, location) -> RouteItineraryItem? in
+                guard index % strideCount == 0 else { return nil }
+                return RouteItineraryItem(
+                    title: "Bench",
+                    mapItem: mapItem(for: location.coordinate),
+                    kind: .accessibility
+                )
+            }
+            items.append(contentsOf: selectedBenches)
+        }
+
+        return items
+    }
+
+    private func routeItems<T>(from locations: [T], title: String) -> [RouteItineraryItem] {
+        locations.compactMap { element in
+            let coordinate: CLLocationCoordinate2D
+            switch element {
+            case let value as bench:
+                coordinate = value.coordinate
+            case let value as ramp:
+                coordinate = value.coordinate
+            case let value as door:
+                coordinate = value.coordinate
+            case let value as parking:
+                coordinate = value.coordinate
+            case let value as elevator:
+                coordinate = value.coordinate
+            case let value as crosswalk:
+                coordinate = value.coordinate
+            default:
+                return nil
+            }
+
+            return RouteItineraryItem(
+                title: title,
+                mapItem: mapItem(for: coordinate),
+                kind: .accessibility
+            )
+        }
+    }
+
+    private func mapItem(for coordinate: CLLocationCoordinate2D) -> MKMapItem {
+        MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
+    }
+
+    private func route(from source: MKMapItem, to destination: MKMapItem, transportType: MKDirectionsTransportType) async -> MKRoute? {
+        await withCheckedContinuation { continuation in
+            let request = MKDirections.Request()
+            request.source = source
+            request.destination = destination
+            request.transportType = transportType
+            request.requestsAlternateRoutes = true
+
+            MKDirections(request: request).calculate { response, _ in
+                continuation.resume(returning: response?.routes.first)
+            }
+        }
+    }
+}
+
+struct AddStopSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let destinationTitle: String
+    let destinationCoordinate: CLLocationCoordinate2D
+    @State private var searchText = ""
+    @State private var searchResults: [MKMapItem] = []
+    @State private var isSearching = false
+    @State private var selectedResult: MKMapItem?
+    @State private var mapPosition: MapCameraPosition = .automatic
+    var onSelect: (MKMapItem) -> Void
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 12) {
+                TextField("Search for another location", text: $searchText)
+                    .textInputAutocapitalization(.words)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(of: .search) {
+                        performSearch()
+                    }
+
+                Map(position: $mapPosition) {
+                    Annotation(destinationTitle, coordinate: destinationCoordinate) {
+                        Image(systemName: "mappin.circle.fill")
+                            .font(.largeTitle)
+                            .foregroundStyle(.red)
+                            .scaleEffect(1.4)
+                    }
+
+                    ForEach(searchResults, id: \.self) { item in
+                        Annotation(item.name ?? "Location", coordinate: item.placemark.coordinate) {
+                            Button {
+                                selectedResult = item
+                            } label: {
+                                Image(systemName: selectedResult == item ? "mappin.circle.fill" : "mappin.circle")
+                                    .font(.title)
+                                    .foregroundStyle(selectedResult == item ? .blue : .red)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .frame(height: 220)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+
+                Text("Results")
+                    .font(.headline)
+
+                List(searchResults, id: \.self) { item in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(item.name ?? "Location")
+                        Text(item.placemark.title ?? "")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .listStyle(.plain)
+
+                if selectedResult != nil {
+                    Button {
+                        if let selectedResult {
+                            onSelect(selectedResult)
+                            dismiss()
+                        }
+                    } label: {
+                        Text("Add Stop")
+                            .font(.headline)
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(.blue, in: RoundedRectangle(cornerRadius: 14))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .navigationTitle("Add Stop")
+            .padding()
+            .onAppear {
+                mapPosition = .region(MKCoordinateRegion(
+                    center: destinationCoordinate,
+                    span: MKCoordinateSpan(latitudeDelta: 0.03, longitudeDelta: 0.03)
+                ))
+            }
+        }
+    }
+
+    private func performSearch() {
+        guard !searchText.isEmpty else { return }
+        isSearching = true
+
+        let request = MKLocalSearch.Request()
+        request.naturalLanguageQuery = searchText
+        request.region = MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: 41.836, longitude: -87.648),
+            latitudinalMeters: 3218.68,
+            longitudinalMeters: 3218.68
+        )
+
+        MKLocalSearch(request: request).start { response, error in
+            DispatchQueue.main.async {
+                defer { isSearching = false }
+                guard let response, error == nil else {
+                    searchResults = []
+                    return
+                }
+                searchResults = response.mapItems
+            }
+        }
+    }
+}
+
+struct AccessibilityLocationsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var selection: RouteAccessibilitySelection
+    var benchAction: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Select the accessibility features you would like to include in the route:")
+                    .font(.headline)
+
+                ScrollView {
+                    VStack(spacing: 12) {
+                        CheckboxRow(title: "Ramps", isOn: $selection.ramps)
+                        CheckboxRow(title: "Automatic Doors", isOn: $selection.automaticDoors)
+                        CheckboxRow(title: "Parking", isOn: $selection.parking)
+                        CheckboxRow(title: "Elevators", isOn: $selection.elevators)
+                        CheckboxRow(title: "Accessible Crosswalks", isOn: $selection.accessibleCrosswalks)
+
+                        Button {
+                            if selection.benches {
+                                selection.benches = false
+                                selection.benchEveryMiles = nil
+                            } else {
+                                selection.benches = true
+                                benchAction()
+                            }
+                        } label: {
+                            HStack {
+                                Image(systemName: selection.benches ? "checkmark.square.fill" : "square")
+                                    .foregroundStyle(.primary)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Benches")
+                                        .foregroundStyle(.primary)
+                                    if let benchEveryMiles = selection.benchEveryMiles {
+                                        Text("every \(benchEveryMiles, specifier: "%.2f") miles")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                Spacer()
+                            }
+                            .padding()
+                            .background(.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+                        }
+                    }
+                }
+            }
+            .padding()
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct CheckboxRow: View {
+    let title: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Button {
+            isOn.toggle()
+        } label: {
+            HStack {
+                Image(systemName: isOn ? "checkmark.square.fill" : "square")
+                    .foregroundStyle(.primary)
+                Text(title)
+                    .foregroundStyle(.primary)
+                Spacer()
+            }
+            .padding()
+            .background(.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+        }
+        .speechAnnouncement(title)
+        .buttonStyle(.plain)
+    }
+}
+
+struct BenchFrequencySheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var selection: RouteAccessibilitySelection
+    @State private var numberText = ""
+    var onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("How often would you like to see a bench?")
+                .font(.headline)
+            Text("Please submit a number between 0-9 miles.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            TextField("Miles", text: $numberText)
+                .textFieldStyle(.roundedBorder)
+                .keyboardType(.decimalPad)
+
+            Divider()
+
+            HStack {
+                Button("Cancel") {
+                    onCancel()
+                    dismiss()
+                }
+
+                Spacer()
+
+                Button("Done") {
+                    let rawValue = Double(numberText) ?? 0
+                    selection.benchEveryMiles = roundedQuarterMiles(rawValue)
+                    dismiss()
+                }
+            }
+        }
+        .padding()
+    }
+
+    private func roundedQuarterMiles(_ value: Double) -> Double {
+        let clamped = min(max(value, 0), 9)
+        return (clamped * 4).rounded() / 4
+    }
+}
+
+struct DirectionsSheet: View {
+    @Environment(SpeechManager.self) private var speechManager
+    let directions: [String]
+    var endRoute: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                List(Array(directions.enumerated()), id: \.offset) { index, instruction in
+                    Text(instruction)
+                        .padding(.vertical, 4)
+                        .listRowBackground(
+                            speechManager.highlightedIdentifier == directionIdentifier(for: index)
+                            ? Color.yellow.opacity(0.16)
+                            : Color.clear
+                        )
+                }
+
+                Button(role: .destructive) {
+                    endRoute()
+                } label: {
+                    Text("End Route")
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .padding()
+            }
+            .navigationTitle("Directions")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .onAppear {
+            speakDirectionsIfNeeded()
+        }
+        .onChange(of: directions) { _, _ in
+            speakDirectionsIfNeeded()
+        }
+    }
+
+    private func directionIdentifier(for index: Int) -> String {
+        "direction-\(index)"
+    }
+
+    private func speakDirectionsIfNeeded() {
+        guard speechManager.isEnabled else { return }
+        let segments = directions.enumerated().map { index, instruction in
+            SpeechSegment(id: directionIdentifier(for: index), text: instruction)
+        }
+        speechManager.speak(segments: segments)
+    }
+}
+
+struct SettingsView: View {
+    @Binding var textSize: AppTextSize
+    @Binding var colorFilter: AppColorFilter
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 20) {
+                SettingsTab(title: "Text Size", systemImage: "textformat.size") {
+                    TextSizeScale(textSize: $textSize)
+                }
+
+                SettingsTab(title: "Color Filter", systemImage: "camera.filters") {
+                    Picker("Color Filter", selection: $colorFilter) {
+                        ForEach(AppColorFilter.allCases) { filter in
+                            Text(filter.title).tag(filter)
+                        }
+                    }
+                    .pickerStyle(.wheel)
+                }
+
+                Spacer()
+            }
+            .padding()
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+}
+
+struct TextSizeScale: View {
+    @Binding var textSize: AppTextSize
+
+    private var sliderValue: Binding<Double> {
+        Binding(
+            get: { Double(textSize.scaleIndex) },
+            set: { newValue in
+                textSize = AppTextSize(scaleIndex: Int(newValue.rounded()))
+            }
+        )
+    }
+    
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 14) {
+                Text("A")
+                    .font(.caption)
+
+                Slider(
+                    value: sliderValue,
+                    in: 0...Double(AppTextSize.allCases.count - 1),
+                    step: 1
+                )
+                .accessibilityLabel("Text Size")
+                .accessibilityValue(textSize.title)
+
+                Text("A")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+            }
+
+            Text(textSize.title)
+                .font(.body)
+                .foregroundStyle(.secondary)
+
+            Text("Sample Text")
+                .font(.body)
+                .dynamicTypeSize(textSize.sampleTextSize)
+        }
+    }
+}
+
+struct SettingsTab<Content: View>: View {
+    let title: String
+    let systemImage: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: systemImage)
+                .font(.headline)
+
+            content
+        }
+        .speechAnnouncement(title)
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+enum AppTextSize: String, CaseIterable, Identifiable {
+    case small
+    case medium
+    case large
+    case extraLarge
+    case extraExtraLarge
+    case extraExtraExtraLarge
+    case accessibilityLarge
+    
+    //creates the text size cases
+
+    var id: Self { self }
+
+    var scaleIndex: Int {
+        switch self {
+        case .small:
+            0
+        case .medium:
+            1
+        case .large:
+            2
+        case .extraLarge:
+            3
+        case .extraExtraLarge:
+            4
+        case .extraExtraExtraLarge:
+            5
+        case .accessibilityLarge:
+            6
+        }
+    }
+    // sets the panel to be a scale
+
+    init(scaleIndex: Int) {
+        let sizes = Self.allCases
+        let clampedIndex = min(max(scaleIndex, 0), sizes.count - 1)
+        self = sizes[clampedIndex]
+    }
+
+    var title: String {
+        switch self {
+        case .small:
+            "Small"
+        case .medium:
+            "Medium"
+        case .large:
+            "Large"
+        case .extraLarge:
+            "Extra Large"
+        case .extraExtraLarge:
+            "Extra Extra Large"
+        case .extraExtraExtraLarge:
+            "Extra Extra Extra Large"
+        case .accessibilityLarge:
+            "Accessibility Large"
+        }
+    }
+
+    var dynamicTypeSize: DynamicTypeSize {
+        switch self {
+        case .small:
+            .small
+        case .medium:
+            .medium
+        case .large:
+            .large
+        case .extraLarge:
+            .xLarge
+        case .extraExtraLarge:
+            .xxLarge
+        case .extraExtraExtraLarge:
+            .xxxLarge
+        case .accessibilityLarge:
+            .accessibility1
+        }
+    }
+    //sets the actual font size to the cases
+    
+    var mapButtonSize: CGFloat {
+        switch self {
+        case .small:
+            40
+        case .medium:
+            44
+        case .large:
+            52
+        case .extraLarge:
+            60
+        case .extraExtraLarge:
+            68
+        case .extraExtraExtraLarge:
+            76
+        case .accessibilityLarge:
+            84
+        }
+    }
+    //sets the size of the buttons to coordinate with the text size scale
+    
+    var mapButtonIconFont: Font {
+        switch self {
+        case .small:
+            .body
+        case .medium:
+            .title3
+        case .large:
+            .title2
+        case .extraLarge:
+            .title
+        case .extraExtraLarge:
+            .largeTitle
+        case .extraExtraExtraLarge:
+            .largeTitle
+        case .accessibilityLarge:
+            .largeTitle
+        }
+    }
+    //sets the size of the icons of the buttons to coordinate with the text size scale
+    
+    var sampleTextSize: DynamicTypeSize {
+        switch self {
+        case .small:
+            .small
+        case .medium:
+            .medium
+        case .large:
+            .large
+        case .extraLarge:
+            .xLarge
+        case .extraExtraLarge:
+            .xxLarge
+        case .extraExtraExtraLarge:
+            .xxxLarge
+        case .accessibilityLarge:
+            .accessibility1
+        }
+    }
+    //sets the size of the sample text to coorelate with the text size scale.
+}
+
+enum AppColorFilter: String, CaseIterable, Identifiable {
+    case none
+    case grayscale
+    case inverted
+    case invertedGrayscale
+    case redBlack
+    case yellowBlack
+    case blueWhite
+    //creates the cases
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .none:
+            "None"
+        case .grayscale:
+            "Grayscale"
+        case .inverted:
+            "Inverted"
+        case .invertedGrayscale:
+            "Inverted Grayscale"
+        case .redBlack:
+            "Red / Black"
+        case .yellowBlack:
+            "Yellow / Black"
+        case .blueWhite:
+            "Blue / White"
+    //sets the name that shows up on the filter panel
+        }
+    }
+}
+
+
+struct AppColorFilterModifier: ViewModifier {
+    let filter: AppColorFilter
+
+    func body(content: Content) -> some View {
+        switch filter {
+        case .none:
+            content
+        case .grayscale:
+            content.saturation(0)
+        case .inverted:
+            content.colorInvert()
+        case .invertedGrayscale:
+            content
+                .saturation(0)
+                .colorInvert()
+        case .redBlack:
+            content
+                .saturation(0)
+                .contrast(1.8)
+                .colorMultiply(.red)
+        case .yellowBlack:
+            content
+                .saturation(0)
+                .contrast(1.8)
+                .colorMultiply(.yellow)
+        case .blueWhite:
+            content
+                .saturation(0)
+                .contrast(1.5)
+                .colorInvert()
+                .colorMultiply(.blue)
+        }
+    }
+}
+//sets the actual filter to each case
+
+extension View {
+    func appColorFilter(_ filter: AppColorFilter) -> some View {
+        modifier(AppColorFilterModifier(filter: filter))
+    }
+}
+
+
+struct RequestLocationView: View {
+    @Environment(SpeechManager.self) private var speechManager
+    let authorizationStatus: CLAuthorizationStatus
+    let requestAccess: () -> Void
+    let openSettings: () -> Void
+
+    private var titleText: String {
+        "Allow Location Access"
+    }
+
+    private var bodyText: String {
+        switch authorizationStatus {
+        case .denied, .restricted:
+            "Location access is turned off. Open Settings to enable Mapscessible."
+        case .notDetermined:
+            "Mapscessible uses your location to center the map, show nearby places, and guide your route."
+        case .authorizedAlways, .authorizedWhenInUse:
+            "Location access is enabled."
+        @unknown default:
+            "Mapscessible uses your location to center the map, show nearby places, and guide your route."
+        }
+    }
+
+    private var primaryButtonTitle: String {
+        switch authorizationStatus {
+        case .denied, .restricted:
+            "Open Settings"
+        default:
+            "Allow Location Access"
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Spacer()
+
+            Image(systemName: "location.viewfinder")
+                .font(.system(size: 52, weight: .semibold))
+                .foregroundStyle(.blue)
+                .padding()
+                .background(.blue.opacity(0.12), in: Circle())
+
+            VStack(spacing: 10) {
+                Text(titleText)
+                    .font(.largeTitle.bold())
+                    .multilineTextAlignment(.center)
+                    .speechAnnouncement(titleText)
+                    .padding(.horizontal, 12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14)
+                            .fill(speechManager.highlightedIdentifier == titleText ? Color.yellow.opacity(0.16) : Color.clear)
+                    )
+
+                Text(bodyText)
+                    .font(.body)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                    .speechAnnouncement(bodyText)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14)
+                            .fill(speechManager.highlightedIdentifier == bodyText ? Color.yellow.opacity(0.16) : Color.clear)
+                    )
+            }
+
+            Button {
+                switch authorizationStatus {
+                case .denied, .restricted:
+                    openSettings()
+                default:
+                    requestAccess()
+                }
+            } label: {
+                Text(primaryButtonTitle)
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(minHeight: 52)
+            }
+            .buttonStyle(.plain)
+            .background(.blue, in: RoundedRectangle(cornerRadius: 16))
+            .speechAnnouncement(primaryButtonTitle)
+            .padding(.horizontal, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 18)
+                    .fill(speechManager.highlightedIdentifier == primaryButtonTitle ? Color.yellow.opacity(0.16) : Color.clear)
+            )
+
+            if authorizationStatus == .notDetermined {
+                Text("You can change this later in Settings.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .speechAnnouncement("You can change this later in Settings.")
+                    .background(
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(speechManager.highlightedIdentifier == "You can change this later in Settings." ? Color.yellow.opacity(0.16) : Color.clear)
+                    )
+            }
+
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(24)
+        .background(
+            LinearGradient(
+                colors: [Color(.systemBackground), Color.blue.opacity(0.08)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
+    }
+}
+
+
+    
+#Preview {
+    ContentView(
+        textSize: .constant(.medium),
+        colorFilter: .constant(.none),
+        savedLocationStore: SavedLocationStore()
+    )
+}
